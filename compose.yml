@@ -74,6 +74,20 @@ services:
         parallelism.default: 1
     volumes:
       - ./flink/jobs:/opt/flink/jobs
+
+  sink:
+    build: ./sink
+    depends_on:
+      - redpanda
+      - postgres
+    environment:
+      REDPANDA_BROKER: redpanda:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PYTHONUNBUFFERED: "1"
 volumes:
   redpanda-data:
   postgres-data:
