@@ -1,40 +1,31 @@
 import argparse
-import os, json
+import json
+import os
 from datetime import datetime, timezone
 
-from alpaca.data.enums import DataFeed
-from alpaca.data.historical import StockHistoricalDataClient
-from alpaca.data.requests import StockTradesRequest
-
-from trade_event import build_trade_event
 from confluent_kafka import Producer
+
+from history import get_historical_events
 
 
 API_KEY = os.environ["ALPACA_API_KEY"]
 SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
-REDPANDA_BROKER = os.getenv("REDPANDA_BROKER", "redpanda:9092")
-TOPIC = os.getenv("REDPANDA_TOPIC", "trades.raw")
 
+REDPANDA_BROKER = os.getenv(
+    "REDPANDA_BROKER",
+    "redpanda:9092",
+)
 
-def get_historical_trades(
-    symbols: list[str],
-    start: datetime,
-    end: datetime,
-):
-    client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
-
-    request = StockTradesRequest(
-        symbol_or_symbols=symbols,
-        start=start,
-        end=end,
-        feed=DataFeed.IEX,
-    )
-
-    return client.get_stock_trades(request)
+TOPIC = os.getenv(
+    "REDPANDA_TOPIC",
+    "trades.raw",
+)
 
 
 def parse_timestamp(value: str) -> datetime:
-    timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    timestamp = datetime.fromisoformat(
+        value.replace("Z", "+00:00")
+    )
 
     if timestamp.tzinfo is None:
         raise ValueError(
@@ -42,20 +33,6 @@ def parse_timestamp(value: str) -> datetime:
         )
 
     return timestamp.astimezone(timezone.utc)
-
-
-def historical_trade_to_event(trade) -> dict:
-    return build_trade_event(
-        symbol=trade.symbol,
-        trade_id=trade.id,
-        price=float(trade.price),
-        size=int(trade.size),
-        event_timestamp=trade.timestamp.isoformat(),
-        exchange=trade.exchange,
-        conditions=trade.conditions,
-        tape=trade.tape,
-        source="historical",
-    )
 
 
 def publish_events(events: list[dict]) -> None:
@@ -79,7 +56,7 @@ def publish_events(events: list[dict]) -> None:
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Retrieve historical Alpaca IEX trades."
+        description="Backfill historical Alpaca IEX trades."
     )
 
     parser.add_argument(
@@ -109,24 +86,19 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    trades = get_historical_trades(
+    events = get_historical_events(
+        api_key=API_KEY,
+        secret_key=SECRET_KEY,
         symbols=args.symbols,
         start=args.start,
         end=args.end,
     )
 
-    events = []
-
-    for symbol in args.symbols:
-        symbol_trades = trades[symbol]
-
-        print(f"{symbol}: {len(symbol_trades)} trades")
-
-        for trade in symbol_trades:
-            events.append(historical_trade_to_event(trade))
-
-    print(f"Publishing {len(events)} trades to {TOPIC}")
+    print(
+        f"Publishing {len(events)} historical trades "
+        f"to {TOPIC}"
+    )
 
     publish_events(events)
 
-    print(f"Published {len(events)} trades")
+    print(f"Published {len(events)} historical trades")

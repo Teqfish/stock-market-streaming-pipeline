@@ -4,7 +4,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockTradesRequest
 
-from producer.src.trade_event import build_trade_event
+from trade_event import build_trade_event
 
 
 def get_historical_events(
@@ -15,6 +15,8 @@ def get_historical_events(
     start: datetime,
     end: datetime,
 ) -> list[dict]:
+    """Retrieve Alpaca IEX trades and convert them to canonical trade events."""
+
     client = StockHistoricalDataClient(
         api_key,
         secret_key,

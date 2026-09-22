@@ -48,4 +48,8 @@ backfill:
 		--end "$(END)"
 
 test:
-	python -m unittest discover -s tests -v
+	docker compose run --rm \
+		-v "$(CURDIR)/tests:/app/tests:ro" \
+		-e PYTHONPATH=/app/src \
+		producer \
+		python -m unittest discover -s /app/tests -v
