@@ -5,6 +5,8 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 from confluent_kafka import Producer
 
+from producer.src.trade_event import build_trade_event
+
 
 ALPACA_API_KEY = os.environ["ALPACA_API_KEY"]
 ALPACA_SECRET_KEY = os.environ["ALPACA_SECRET_KEY"]
@@ -32,12 +34,17 @@ def delivery_report(err, msg):
 
 
 async def handle_trade(trade):
-    event = {
-        "symbol": trade.symbol,
-        "price": float(trade.price),
-        "size": int(trade.size),
-        "event_timestamp": trade.timestamp.isoformat(),
-    }
+    event = build_trade_event(
+        symbol=trade.symbol,
+        trade_id=trade.id,
+        price=float(trade.price),
+        size=int(trade.size),
+        event_timestamp=trade.timestamp.isoformat(),
+        exchange=trade.exchange,
+        conditions=trade.conditions,
+        tape=trade.tape,
+        source="live",
+    )
 
     producer.produce(
         topic=TOPIC,

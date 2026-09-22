@@ -2,7 +2,6 @@ import json
 from datetime import datetime
 
 from pyflink.common import Duration, Time, Types, WatermarkStrategy
-from pyflink.datastream.state import ListStateDescriptor
 from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import (
@@ -16,6 +15,11 @@ from pyflink.datastream.functions import (
     KeyedProcessFunction,
     ProcessWindowFunction,
 )
+from pyflink.datastream.state import (
+    ListStateDescriptor,
+    StateTtlConfig,
+    ValueStateDescriptor,
+)
 from pyflink.datastream.window import TumblingEventTimeWindows
 
 
@@ -28,6 +32,7 @@ def parse_trade(message):
     trade = json.loads(message)
 
     return (
+        trade.get("event_id", ""),
         trade["symbol"],
         float(trade["price"]),
         int(trade["size"]),
@@ -44,6 +49,49 @@ class TradeTimestampAssigner:
     def extract_timestamp(self, trade, record_timestamp):
         return trade[3]
 
+
+class DeduplicateTrade(KeyedProcessFunction):
+    def open(self, runtime_context):
+        ttl_config = (
+            StateTtlConfig
+            .new_builder(Time.hours(24))
+            .set_update_type(
+                StateTtlConfig.UpdateType.OnCreateAndWrite
+            )
+            .set_state_visibility(
+                StateTtlConfig.StateVisibility.NeverReturnExpired
+            )
+            .build()
+        )
+
+        descriptor = ValueStateDescriptor(
+            "seen",
+            Types.BOOLEAN(),
+        )
+
+        descriptor.enable_time_to_live(ttl_config)
+
+        self.seen = runtime_context.get_state(descriptor)
+
+        self.duplicates_dropped = (
+            runtime_context
+            .get_metrics_group()
+            .counter("duplicates_dropped")
+        )
+
+    def process_element(self, trade, ctx):
+        if self.seen.value():
+            self.duplicates_dropped.inc()
+            return
+
+        self.seen.update(True)
+
+        yield (
+            trade[1],
+            trade[2],
+            trade[3],
+            trade[4],
+        )
 
 class OhlcvAggregate(AggregateFunction):
 
@@ -218,6 +266,7 @@ def build_candles(trades, minutes):
 
 def main():
     env = StreamExecutionEnvironment.get_execution_environment()
+    env.enable_checkpointing(30_000)
     env.set_parallelism(1)
 
     source = (
@@ -241,12 +290,52 @@ def main():
         output_type=Types.TUPLE(
             [
                 Types.STRING(),
+                Types.STRING(),
                 Types.DOUBLE(),
                 Types.LONG(),
                 Types.LONG(),
             ]
         ),
     )
+
+    legacy_trades = trades.filter(
+        lambda trade: trade[0] == ""
+    ).map(
+        lambda trade: (
+            trade[1],
+            trade[2],
+            trade[3],
+            trade[4],
+        ),
+        output_type=Types.TUPLE(
+            [
+                Types.STRING(),
+                Types.DOUBLE(),
+                Types.LONG(),
+                Types.LONG(),
+            ]
+        ),
+    )
+
+    canonical_trades = (
+        trades
+        .filter(lambda trade: trade[0] != "")
+        .key_by(lambda trade: trade[0])
+        .process(
+            DeduplicateTrade(),
+            output_type=Types.TUPLE(
+                [
+                    Types.STRING(),
+                    Types.DOUBLE(),
+                    Types.LONG(),
+                    Types.LONG(),
+                ]
+            ),
+        )
+        .name("Deduplicate Trades")
+    )
+
+    trades = legacy_trades.union(canonical_trades)
 
     watermark_strategy = (
         WatermarkStrategy

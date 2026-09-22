@@ -59,8 +59,10 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         parallelism.default: 1
+        state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:
       - ./flink/jobs:/opt/flink/jobs
+      - flink-checkpoints:/opt/flink/checkpoints
 
   taskmanager:
     build: ./flink
@@ -72,8 +74,10 @@ services:
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
         parallelism.default: 1
+        state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:
       - ./flink/jobs:/opt/flink/jobs
+      - flink-checkpoints:/opt/flink/checkpoints
 
   sink:
     build: ./sink
@@ -103,6 +107,8 @@ services:
       - "8501:8501"
     volumes:
       - ./dashboard:/app
+
 volumes:
   redpanda-data:
   postgres-data:
+  flink-checkpoints:

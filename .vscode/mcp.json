@@ -8,10 +8,10 @@
         "start-stdio"
       ],
       "env": {
-        "ALTIMATE_EXTENSION_RPC": "/var/folders/n_/hxphrbnj4ws4q1dn8z8bfzk80000gn/T/altimate-mcp-90744.sock",
+        "ALTIMATE_EXTENSION_RPC": "/var/folders/n_/hxphrbnj4ws4q1dn8z8bfzk80000gn/T/altimate-mcp-99943.sock",
         "ELECTRON_RUN_AS_NODE": "1"
       },
-      "updatedAt": "2026-09-17T23:20:53.257Z"
+      "updatedAt": "2026-09-18T11:14:46.760Z"
     }
   }
 }
