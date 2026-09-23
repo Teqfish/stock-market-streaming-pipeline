@@ -153,6 +153,7 @@ services:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 3072m
         parallelism.default: 1
         state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:

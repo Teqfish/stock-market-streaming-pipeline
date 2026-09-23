@@ -3,6 +3,8 @@ import os
 import urllib.error
 import urllib.request
 import exchange_calendars as xcals
+import time
+import psycopg2
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -468,6 +470,143 @@ def market_backfill():
             ],
         }
 
+    @task
+    def validate_postgres_backfill(
+        session: dict,
+    ) -> None:
+        """Wait for reconstructed candles to reach PostgreSQL and validate them."""
+
+        symbols = session["symbols"]
+        session_open = datetime.fromisoformat(session["start"])
+        session_close = datetime.fromisoformat(session["end"])
+
+        expected_window_sizes = {"1m", "5m", "15m"}
+        timeout_seconds = 60
+        poll_interval_seconds = 2
+        deadline = time.monotonic() + timeout_seconds
+
+        connection_kwargs = {
+            "host": os.environ["PIPELINE_POSTGRES_HOST"],
+            "port": os.environ.get("PIPELINE_POSTGRES_PORT", "5432"),
+            "dbname": os.environ["PIPELINE_POSTGRES_DB"],
+            "user": os.environ["PIPELINE_POSTGRES_USER"],
+            "password": os.environ["PIPELINE_POSTGRES_PASSWORD"],
+        }
+
+        query = """
+            SELECT
+                window_size,
+                COUNT(*) AS candle_count,
+                COUNT(*) FILTER (
+                    WHERE open IS NULL
+                    OR high IS NULL
+                    OR low IS NULL
+                    OR close IS NULL
+                    OR volume IS NULL
+                ) AS null_ohlcv_count,
+                COUNT(*) FILTER (
+                    WHERE volume <= 0
+                ) AS invalid_volume_count,
+                COUNT(*) FILTER (
+                    WHERE low > open
+                    OR open > high
+                    OR low > close
+                    OR close > high
+                ) AS invalid_ohlc_count,
+                MIN(window_start) AS first_window_start,
+                MAX(window_end) AS last_window_end
+            FROM candles
+            WHERE symbol = %s
+            AND window_start >= %s
+            AND window_start < %s
+            GROUP BY window_size
+            ORDER BY window_size;
+        """
+
+        while True:
+            problems = []
+
+            with psycopg2.connect(**connection_kwargs) as conn:
+                with conn.cursor() as cursor:
+                    for symbol in symbols:
+                        cursor.execute(
+                            query,
+                            (symbol, session_open, session_close),
+                        )
+                        rows = cursor.fetchall()
+
+                        results = {
+                            row[0]: {
+                                "candle_count": row[1],
+                                "null_ohlcv_count": row[2],
+                                "invalid_volume_count": row[3],
+                                "invalid_ohlc_count": row[4],
+                                "first_window_start": row[5],
+                                "last_window_end": row[6],
+                            }
+                            for row in rows
+                        }
+
+                        missing = expected_window_sizes - results.keys()
+                        if missing:
+                            problems.append(
+                                f"{symbol}: missing window sizes {sorted(missing)}"
+                            )
+                            continue
+
+                        for window_size, result in results.items():
+                            if result["candle_count"] == 0:
+                                problems.append(
+                                    f"{symbol} {window_size}: no candles"
+                                )
+
+                            if result["null_ohlcv_count"] > 0:
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    f"{result['null_ohlcv_count']} candles contain NULL OHLCV"
+                                )
+
+                            if result["invalid_volume_count"] > 0:
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    f"{result['invalid_volume_count']} candles have invalid volume"
+                                )
+
+                            if result["invalid_ohlc_count"] > 0:
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    f"{result['invalid_ohlc_count']} candles violate OHLC bounds"
+                                )
+
+                            if result["first_window_start"] < session_open:
+                                problems.append(
+                                    f"{symbol} {window_size}: candle starts before session"
+                                )
+
+                            if result["last_window_end"] > session_close:
+                                problems.append(
+                                    f"{symbol} {window_size}: candle ends after session"
+                                )
+
+            if not problems:
+                print(
+                    "PostgreSQL backfill validation passed for "
+                    f"{', '.join(symbols)}."
+                )
+                return
+
+            if time.monotonic() >= deadline:
+                raise AirflowFailException(
+                    "PostgreSQL backfill validation failed after "
+                    f"{timeout_seconds}s: {'; '.join(problems)}"
+                )
+
+            print(
+                "PostgreSQL backfill not valid yet; "
+                f"retrying in {poll_interval_seconds}s: {'; '.join(problems)}"
+            )
+            time.sleep(poll_interval_seconds)
+
     request = validate_request()
 
     session = resolve_market_session(request)
@@ -495,10 +634,15 @@ def market_backfill():
         end_offsets,
     )
 
+    postgres_validation = validate_postgres_backfill(
+        session=session,
+    )
+
     validated_dataset >> start_offsets
     start_offsets >> publication
     publication >> end_offsets
     end_offsets >> flink_backfill
+    flink_backfill >> postgres_validation
 
 
 market_backfill()

@@ -1,7 +1,12 @@
 .PHONY: \
 	up down build logs ps reset \
-	flink-build flink-up flink-down flink-logs flink-submit\
+	flink-build flink-up flink-down flink-logs flink-submit \
+	airflow-up airflow-down airflow-logs \
 	backfill test
+
+# ---------------------------------------------------------------------------
+# Full stack
+# ---------------------------------------------------------------------------
 
 up:
 	docker compose up -d
@@ -21,23 +26,58 @@ ps:
 reset:
 	docker compose down -v
 
+
+# ---------------------------------------------------------------------------
+# Flink
+# ---------------------------------------------------------------------------
+
 flink-build:
-	docker compose build jobmanager taskmanager
+	docker compose build jobmanager taskmanager flink-submitter
 
 flink-up:
-	docker compose up -d jobmanager taskmanager
+	docker compose up -d jobmanager taskmanager flink-submitter
 
 flink-down:
-	docker compose stop jobmanager taskmanager
+	docker compose stop jobmanager taskmanager flink-submitter
 
 flink-logs:
-	docker compose logs -f jobmanager taskmanager
+	docker compose logs -f jobmanager taskmanager flink-submitter
 
 flink-submit:
 	docker compose exec jobmanager \
 		flink run \
 		--python /opt/flink/jobs/candles.py \
 		--pyFiles /opt/flink/jobs/processing.py
+
+
+# ---------------------------------------------------------------------------
+# Airflow
+# ---------------------------------------------------------------------------
+
+airflow-up:
+	docker compose up -d \
+		airflow-postgres \
+		airflow-api-server \
+		airflow-scheduler \
+		airflow-dag-processor
+
+airflow-down:
+	docker compose stop \
+		airflow-api-server \
+		airflow-scheduler \
+		airflow-dag-processor \
+		airflow-postgres
+
+airflow-logs:
+	docker compose logs -f \
+		airflow-api-server \
+		airflow-scheduler \
+		airflow-dag-processor
+
+
+# ---------------------------------------------------------------------------
+# Historical data
+# ---------------------------------------------------------------------------
 
 backfill:
 	@test -n "$(SYMBOLS)" || (echo "SYMBOLS is required"; exit 1)
@@ -48,6 +88,11 @@ backfill:
 		--symbols $(SYMBOLS) \
 		--start "$(START)" \
 		--end "$(END)"
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
 
 test:
 	docker compose run --rm \
