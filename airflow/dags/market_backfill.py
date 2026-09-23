@@ -1,4 +1,7 @@
-import json, os
+import json
+import os
+import urllib.error
+import urllib.request
 import exchange_calendars as xcals
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,10 @@ REDPANDA_BROKER = os.environ.get(
     "redpanda:29092",
 )
 RAW_TRADES_TOPIC = "trades.raw"
+FLINK_SUBMITTER_URL = os.environ.get(
+    "FLINK_SUBMITTER_URL",
+    "http://flink-submitter:8090",
+)
 
 
 def parse_timestamp(value):
@@ -401,6 +408,66 @@ def market_backfill():
             "records_in_range": records_added,
         }
 
+    @task
+    def run_bounded_flink_backfill(
+        session,
+        offset_range,
+    ):
+        payload = {
+            "symbols": session["symbols"],
+            "start": session["start"],
+            "end": session["end"],
+            "start_offsets": offset_range["start_offsets"],
+            "end_offsets": offset_range["end_offsets"],
+        }
+
+        request = urllib.request.Request(
+            f"{FLINK_SUBMITTER_URL}/backfills",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=120,
+            ) as response:
+                result = json.loads(
+                    response.read().decode("utf-8")
+                )
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode(
+                "utf-8",
+                errors="replace",
+            )
+
+            raise AirflowFailException(
+                "Bounded Flink backfill failed: "
+                f"HTTP {exc.code}: {error_body}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise AirflowFailException(
+                "Could not reach Flink submitter: "
+                f"{exc.reason}"
+            ) from exc
+
+        if result.get("status") != "finished":
+            raise AirflowFailException(
+                "Flink submitter returned unexpected result: "
+                f"{result}"
+            )
+
+        return {
+            "status": result["status"],
+            "published_count": offset_range[
+                "published_count"
+            ],
+            "records_in_range": offset_range[
+                "records_in_range"
+            ],
+        }
+
     request = validate_request()
 
     session = resolve_market_session(request)
@@ -423,9 +490,15 @@ def market_backfill():
         publication,
     )
 
+    flink_backfill = run_bounded_flink_backfill(
+        session,
+        end_offsets,
+    )
+
     validated_dataset >> start_offsets
     start_offsets >> publication
     publication >> end_offsets
+    end_offsets >> flink_backfill
 
 
 market_backfill()

@@ -159,6 +159,17 @@ services:
       - ./flink/jobs:/opt/flink/jobs
       - flink-checkpoints:/opt/flink/checkpoints
 
+  flink-submitter:
+    build: ./flink
+    entrypoint:
+      - python
+      - /opt/flink/submitter.py
+    depends_on:
+      - jobmanager
+      - taskmanager
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs:ro
+
   sink:
     build: ./sink
     depends_on:
