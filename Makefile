@@ -35,7 +35,9 @@ flink-logs:
 
 flink-submit:
 	docker compose exec jobmanager \
-		flink run --python /opt/flink/jobs/candles.py
+		flink run \
+		--python /opt/flink/jobs/candles.py \
+		--pyFiles /opt/flink/jobs/processing.py
 
 backfill:
 	@test -n "$(SYMBOLS)" || (echo "SYMBOLS is required"; exit 1)

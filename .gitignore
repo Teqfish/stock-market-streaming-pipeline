@@ -219,3 +219,6 @@ __marimo__/
 
 # VS Code
 .vscode/
+
+# Airflow
+airflow/auth/simple_auth_manager_passwords.json

@@ -1,11 +1,9 @@
 import argparse
-import json
 import os
 from datetime import datetime, timezone
 
-from confluent_kafka import Producer
-
 from history import get_historical_events
+from redpanda import publish_events
 
 
 API_KEY = os.environ["ALPACA_API_KEY"]
@@ -33,25 +31,6 @@ def parse_timestamp(value: str) -> datetime:
         )
 
     return timestamp.astimezone(timezone.utc)
-
-
-def publish_events(events: list[dict]) -> None:
-    producer = Producer(
-        {
-            "bootstrap.servers": REDPANDA_BROKER,
-        }
-    )
-
-    for event in events:
-        producer.produce(
-            topic=TOPIC,
-            key=event["symbol"],
-            value=json.dumps(event),
-        )
-
-        producer.poll(0)
-
-    producer.flush()
 
 
 def parse_args():
@@ -99,6 +78,10 @@ if __name__ == "__main__":
         f"to {TOPIC}"
     )
 
-    publish_events(events)
+    published_count = publish_events(
+        events=events,
+        broker=REDPANDA_BROKER,
+        topic=TOPIC,
+    )
 
-    print(f"Published {len(events)} historical trades")
+    print(f"Published {published_count} historical trades")
