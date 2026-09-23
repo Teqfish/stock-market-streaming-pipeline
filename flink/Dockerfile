@@ -8,7 +8,11 @@ RUN apt-get update -y && \
 
 RUN ln -sf /usr/bin/python3 /usr/bin/python
 
-RUN pip3 install --no-cache-dir apache-flink==2.1.3
+COPY requirements.txt /tmp/requirements.txt
+
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+COPY submitter.py /opt/flink/submitter.py
 
 RUN wget -P /opt/flink/lib \
     https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-kafka/4.0.1-2.0/flink-sql-connector-kafka-4.0.1-2.0.jar
