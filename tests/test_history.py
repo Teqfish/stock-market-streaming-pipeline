@@ -66,6 +66,16 @@ class TestHistoricalEvents(unittest.TestCase):
         self.assertEqual(event["trade_id"], 7453)
         self.assertEqual(event["symbol"], "NVDA")
         self.assertEqual(event["source"], "historical")
+        self.assertEqual(event["price"], 223.61)
+        self.assertEqual(event["size"], 5)
+        self.assertEqual(
+            event["event_timestamp"],
+            "2026-09-21T14:31:00+00:00",
+        )
+        self.assertEqual(event["exchange"], "V")
+        self.assertEqual(event["conditions"], ["@", "I"])
+        self.assertEqual(event["tape"], "C")
+        self.assertEqual(event["feed"], "iex")
 
 
 if __name__ == "__main__":
