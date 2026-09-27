@@ -195,10 +195,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AIRFLOW_API_URL: http://airflow-api-server:8080
+      AIRFLOW_USERNAME: airflow
     ports:
       - "8501:8501"
     volumes:
       - ./dashboard:/app
+      - ./airflow/auth/simple_auth_manager_passwords.json:/run/secrets/airflow_passwords.json:ro
 
 volumes:
   redpanda-data:

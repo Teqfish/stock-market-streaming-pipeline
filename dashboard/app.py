@@ -1,10 +1,13 @@
 import os
-
+import json
+import urllib.error
+import urllib.request
 import pandas as pd
 import plotly.graph_objects as go
 import psycopg2
 import streamlit as st
-
+from datetime import date, datetime, timezone
+from plotly.subplots import make_subplots
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", "5432"))
@@ -21,11 +24,72 @@ GAMMAN_SYMBOLS = [
     "NVDA",
 ]
 
+
+AIRFLOW_API_URL = os.getenv(
+    "AIRFLOW_API_URL",
+    "http://airflow-api-server:8080",
+)
+AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "airflow")
+AIRFLOW_PASSWORDS_FILE = "/run/secrets/airflow_passwords.json"
+
+
 st.set_page_config(
     page_title="Streams of GAMMAN",
     page_icon="📈",
     layout="wide",
 )
+
+
+def get_airflow_token():
+    """Authenticate with Airflow and return a JWT access token."""
+    with open(AIRFLOW_PASSWORDS_FILE) as f:
+        passwords = json.load(f)
+
+    payload = json.dumps(
+        {
+            "username": AIRFLOW_USERNAME,
+            "password": passwords[AIRFLOW_USERNAME],
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        f"{AIRFLOW_API_URL}/auth/token",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)["access_token"]
+
+
+def trigger_backfill(symbol, trading_date):
+    """Trigger the Airflow market_backfill DAG."""
+    token = get_airflow_token()
+
+    payload = json.dumps(
+        {
+            "logical_date": datetime.now(timezone.utc).isoformat(),
+            "conf": {
+                "symbols": [symbol],
+                "trading_date": trading_date.isoformat(),
+            },
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        f"{AIRFLOW_API_URL}/api/v2/dags/market_backfill/dagRuns",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return json.load(response)
 
 
 def get_connection():
@@ -91,121 +155,62 @@ def get_candles(symbol, window_size, limit=200):
     return dataframe.sort_values("window_start")
 
 
-def get_latest_timestamp(symbol, window_size):
+def get_available_sessions(symbol):
     query = """
-        SELECT MAX(window_start)
+        SELECT DISTINCT
+            (window_start AT TIME ZONE 'America/New_York')::date
+                AS session_date
         FROM candles
         WHERE symbol = %s
-          AND window_size = %s;
+          AND window_size = '1m'
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                >= TIME '09:30'
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                < TIME '16:00'
+        ORDER BY session_date DESC;
     """
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute(query, (symbol, window_size))
-            return cursor.fetchone()[0]
+            cursor.execute(query, (symbol,))
+            return [row[0] for row in cursor.fetchall()]
 
 
-def get_candles_for_view(symbol, window_size, view):
-    latest_timestamp = get_latest_timestamp(symbol, window_size)
-
-    if latest_timestamp is None:
-        return pd.DataFrame()
-
-    if view == "Live session":
-        query = """
-            WITH latest_session AS (
-                SELECT
-                    (MAX(window_start) AT TIME ZONE 'America/New_York')::date
-                    AS session_date
-                FROM candles
-                WHERE symbol = %s
-                  AND window_size = %s
-            )
-            SELECT
-                symbol,
-                window_size,
-                window_start,
-                window_end,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                sma_5,
-                sma_20
-            FROM candles, latest_session
-            WHERE symbol = %s
-              AND window_size = %s
-              AND (window_start AT TIME ZONE 'America/New_York')::date
-                    = session_date
-              AND (window_start AT TIME ZONE 'America/New_York')::time
-                    >= TIME '09:30'
-              AND (window_start AT TIME ZONE 'America/New_York')::time
-                    < TIME '16:00'
-            ORDER BY window_start;
-        """
-
-        params = (
+def get_candles_for_session(symbol, window_size, session_date):
+    query = """
+        SELECT
             symbol,
             window_size,
-            symbol,
-            window_size,
-        )
-
-    else:
-        lookbacks = {
-            "1h": pd.Timedelta(hours=1),
-            "4h": pd.Timedelta(hours=4),
-            "1d": pd.Timedelta(days=1),
-            "5d": pd.Timedelta(days=5),
-        }
-
-        start_timestamp = latest_timestamp - lookbacks[view]
-
-        query = """
-            SELECT
-                symbol,
-                window_size,
-                window_start,
-                window_end,
-                open,
-                high,
-                low,
-                close,
-                volume,
-                sma_5,
-                sma_20
-            FROM candles
-            WHERE symbol = %s
-              AND window_size = %s
-              AND window_start >= %s
-            ORDER BY window_start;
-        """
-
-        params = (
-            symbol,
-            window_size,
-            start_timestamp,
-        )
+            window_start,
+            window_end,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            sma_5,
+            sma_20
+        FROM candles
+        WHERE symbol = %s
+          AND window_size = %s
+          AND (window_start AT TIME ZONE 'America/New_York')::date = %s
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                >= TIME '09:30'
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                < TIME '16:00'
+        ORDER BY window_start;
+    """
 
     with get_connection() as connection:
         return pd.read_sql_query(
             query,
             connection,
-            params=params,
+            params=(symbol, window_size, session_date),
         )
 
 
-def get_session_metrics(symbol):
+def get_session_metrics(symbol, session_date):
     query = """
-        WITH latest_session AS (
-            SELECT
-                (MAX(window_start) AT TIME ZONE 'America/New_York')::date
-                AS session_date
-            FROM candles
-            WHERE symbol = %s
-              AND window_size = '1m'
-        )
         SELECT
             (ARRAY_AGG(
                 open ORDER BY window_start
@@ -216,20 +221,19 @@ def get_session_metrics(symbol):
             MAX(high) AS session_high,
             MIN(low) AS session_low,
             SUM(volume) AS session_volume
-        FROM candles, latest_session
+        FROM candles
         WHERE symbol = %s
-          AND window_size = '1m'
-          AND (window_start AT TIME ZONE 'America/New_York')::date
-                = session_date
-          AND (window_start AT TIME ZONE 'America/New_York')::time
+        AND window_size = '1m'
+        AND (window_start AT TIME ZONE 'America/New_York')::date = %s
+        AND (window_start AT TIME ZONE 'America/New_York')::time
                 >= TIME '09:30'
-          AND (window_start AT TIME ZONE 'America/New_York')::time
+        AND (window_start AT TIME ZONE 'America/New_York')::time
                 < TIME '16:00';
     """
 
     with get_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute(query, (symbol, symbol))
+            cursor.execute(query, (symbol, session_date))
             row = cursor.fetchone()
 
     if row is None or row[0] is None:
@@ -243,8 +247,15 @@ def get_session_metrics(symbol):
         "session_volume": row[4],
     }
 
-def create_price_chart(dataframe, hide_non_trading=False):
-    figure = go.Figure()
+
+def create_market_chart(dataframe):
+    figure = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.75, 0.25],
+    )
 
     figure.add_trace(
         go.Candlestick(
@@ -259,20 +270,11 @@ def create_price_chart(dataframe, hide_non_trading=False):
             increasing_fillcolor="#096009",
             decreasing_fillcolor="#600909",
             opacity=1,
-            whiskerwidth=0.66
-        )
+            whiskerwidth=0.66,
+        ),
+        row=1,
+        col=1,
     )
-
-    # figure.add_trace(
-    #     go.Scatter(
-    #         x=dataframe["window_start"],
-    #         y=dataframe["close"],
-    #         mode="lines",
-    #         name="Close",
-    #         line=dict(color=COLOR_CLOSE),
-    #         opacity=0.3,
-    #     )
-    # )
 
     figure.add_trace(
         go.Scatter(
@@ -282,7 +284,9 @@ def create_price_chart(dataframe, hide_non_trading=False):
             name="SMA 5",
             line=dict(color="#359EFF"),
             opacity=0.9,
-        )
+        ),
+        row=1,
+        col=1,
     )
 
     figure.add_trace(
@@ -293,62 +297,37 @@ def create_price_chart(dataframe, hide_non_trading=False):
             name="SMA 20",
             line=dict(color="#1E36D1"),
             opacity=0.7,
-        )
-    )
-
-    figure.update_layout(
-        xaxis_rangeslider_visible=False,
-        height=600,
-        margin=dict(l=20, r=20, t=30, b=20),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.1,
-            xanchor="left",
-            x=0,
         ),
+        row=1,
+        col=1,
     )
-
-    if hide_non_trading:
-        figure.update_xaxes(
-            rangebreaks=[
-                dict(bounds=["sat", "mon"]),
-                dict(bounds=[16, 9.5], pattern="hour"),
-            ]
-        )
-
-    return figure
-
-
-def create_volume_chart(dataframe, hide_non_trading=False):
-    figure = go.Figure()
 
     figure.add_trace(
         go.Bar(
             x=dataframe["window_start"],
             y=dataframe["volume"],
             name="Volume",
-            marker_color='deepskyblue',
-            opacity=0.6
-        )
+            marker_color="deepskyblue",
+            opacity=0.6,
+        ),
+        row=2,
+        col=1,
     )
 
     figure.update_layout(
-        height=250,
-        margin=dict(l=20, r=20, t=20, b=20),
-        showlegend=False,
+        height=750,
+        margin=dict(l=20, r=20, t=30, b=20),
+        xaxis_rangeslider_visible=False,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.05,
+            xanchor="left",
+            x=0,
+        ),
     )
 
-    if hide_non_trading:
-        figure.update_xaxes(
-            rangebreaks=[
-                dict(bounds=["sat", "mon"]),
-                dict(bounds=[16, 9.5], pattern="hour"),
-            ]
-        )
-
     return figure
-
 
 ## ======================================
 ## RENDER DASHBOARD
@@ -363,7 +342,7 @@ if not symbols:
     st.warning("No candle data is currently available.")
     st.stop()
 
-controls = st.columns([2, 2, 3, 3])
+controls = st.columns(3)
 
 with controls[0]:
     symbol = st.selectbox(
@@ -380,25 +359,81 @@ with controls[1]:
         required=True,
     )
 
+available_sessions = get_available_sessions(symbol)
+
+if not available_sessions:
+    st.warning(f"No trading sessions are available for {symbol}.")
+    st.stop()
+
 with controls[2]:
-    view = st.segmented_control(
-        "View",
-        options=["Live session", "1h", "4h", "1d", "5d"],
-        default="Live session",
-        required=True,
+    session_date = st.selectbox(
+        "Trading session",
+        available_sessions,
+        index=0,
+        format_func=lambda value: value.strftime("%a %d %b %Y"),
     )
+
+backfiller = st.columns(2)
+
+with backfiller[0]:
+    with st.expander("Backfill historical data"):
+        st.caption(
+            "Recover historical market data for a completed trading session. "
+            "Backfills are limited to one trading day per run."
+        )
+
+        backfill_col_1, backfill_col_2 = st.columns(2)
+
+        with backfill_col_1:
+            backfill_symbol = st.selectbox(
+                "Ticker",
+                symbols,
+                key="backfill_symbol",
+            )
+
+        with backfill_col_2:
+            backfill_date = st.date_input(
+                "Trading date",
+                value=date.today(),
+                max_value=date.today(),
+                key="backfill_date",
+            )
+
+        if st.button("Run backfill"):
+            try:
+                result = trigger_backfill(
+                    backfill_symbol,
+                    backfill_date,
+                )
+
+                st.success(
+                    f"Backfill started for {backfill_symbol} "
+                    f"on {backfill_date.isoformat()}."
+                )
+
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode()
+                st.error(
+                    f"Airflow rejected the backfill request "
+                    f"(HTTP {exc.code}): {error_body}"
+                )
+
+            except Exception as exc:
+                st.error(f"Could not start backfill: {exc}")
+
 
 @st.fragment(run_every="10s")
-def render_dashboard(symbol, window_size, view):
-    candles = get_candles_for_view(
+def render_dashboard(symbol, window_size, session_date):
+    candles = get_candles_for_session(
         symbol=symbol,
         window_size=window_size,
-        view=view,
+        session_date=session_date,
     )
 
-    hide_non_trading = view in {"1d", "5d"}
-
-    session_metrics = get_session_metrics(symbol)
+    session_metrics = get_session_metrics(
+        symbol,
+        session_date,
+    )
 
     if candles.empty:
         st.info(f"No {window_size} candles are available for {symbol}.")
@@ -442,18 +477,7 @@ def render_dashboard(symbol, window_size, view):
     )
 
     st.plotly_chart(
-        create_price_chart(
-            candles,
-            hide_non_trading=hide_non_trading,
-        ),
-        width="stretch",
-    )
-
-    st.plotly_chart(
-        create_volume_chart(
-            candles,
-            hide_non_trading=hide_non_trading,
-        ),
+        create_market_chart(candles),
         width="stretch",
     )
 
@@ -465,4 +489,4 @@ def render_dashboard(symbol, window_size, view):
         )
 
 
-render_dashboard(symbol, window_size, view)
+render_dashboard(symbol, window_size, session_date)
