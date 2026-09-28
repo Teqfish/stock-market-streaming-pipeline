@@ -13,6 +13,11 @@ from airflow.sdk import dag, task
 
 from history import get_historical_events
 from redpanda import get_high_watermarks, publish_events
+from backfill_validation import (
+    WINDOW_MINUTES,
+    build_expected_windows,
+    compare_windows,
+)
 
 
 MARKET_CALENDAR = "XNYS"
@@ -473,6 +478,7 @@ def market_backfill():
     @task
     def validate_postgres_backfill(
         session: dict,
+        validated_dataset: dict,
     ) -> None:
         """Wait for reconstructed candles to reach PostgreSQL and validate them."""
 
@@ -480,7 +486,26 @@ def market_backfill():
         session_open = datetime.fromisoformat(session["start"])
         session_close = datetime.fromisoformat(session["end"])
 
-        expected_window_sizes = {"1m", "5m", "15m"}
+        dataset_path = Path(validated_dataset["path"])
+
+        if not dataset_path.exists():
+            raise AirflowFailException(
+                f"Validated historical dataset does not exist: "
+                f"{dataset_path}"
+            )
+
+        with dataset_path.open() as file:
+            events = json.load(file)
+
+        try:
+            expected_windows = build_expected_windows(
+                events,
+                symbols,
+            )
+        except ValueError as exc:
+            raise AirflowFailException(str(exc)) from exc
+
+        expected_window_sizes = set(WINDOW_MINUTES)
         timeout_seconds = 60
         poll_interval_seconds = 2
         deadline = time.monotonic() + timeout_seconds
@@ -496,31 +521,18 @@ def market_backfill():
         query = """
             SELECT
                 window_size,
-                COUNT(*) AS candle_count,
-                COUNT(*) FILTER (
-                    WHERE open IS NULL
-                    OR high IS NULL
-                    OR low IS NULL
-                    OR close IS NULL
-                    OR volume IS NULL
-                ) AS null_ohlcv_count,
-                COUNT(*) FILTER (
-                    WHERE volume <= 0
-                ) AS invalid_volume_count,
-                COUNT(*) FILTER (
-                    WHERE low > open
-                    OR open > high
-                    OR low > close
-                    OR close > high
-                ) AS invalid_ohlc_count,
-                MIN(window_start) AS first_window_start,
-                MAX(window_end) AS last_window_end
+                window_start,
+                window_end,
+                open,
+                high,
+                low,
+                close,
+                volume
             FROM candles
             WHERE symbol = %s
             AND window_start >= %s
             AND window_start < %s
-            GROUP BY window_size
-            ORDER BY window_size;
+            ORDER BY window_size, window_start;
         """
 
         while True:
@@ -533,59 +545,101 @@ def market_backfill():
                             query,
                             (symbol, session_open, session_close),
                         )
+
                         rows = cursor.fetchall()
 
-                        results = {
-                            row[0]: {
-                                "candle_count": row[1],
-                                "null_ohlcv_count": row[2],
-                                "invalid_volume_count": row[3],
-                                "invalid_ohlc_count": row[4],
-                                "first_window_start": row[5],
-                                "last_window_end": row[6],
-                            }
-                            for row in rows
+                        actual_windows = {
+                            window_size: set()
+                            for window_size in expected_window_sizes
                         }
 
-                        missing = expected_window_sizes - results.keys()
-                        if missing:
-                            problems.append(
-                                f"{symbol}: missing window sizes {sorted(missing)}"
+                        for (
+                            window_size,
+                            window_start,
+                            window_end,
+                            open_price,
+                            high_price,
+                            low_price,
+                            close_price,
+                            volume,
+                        ) in rows:
+
+                            if window_size not in expected_window_sizes:
+                                continue
+
+                            actual_windows[window_size].add(
+                                window_start
                             )
-                            continue
 
-                        for window_size, result in results.items():
-                            if result["candle_count"] == 0:
-                                problems.append(
-                                    f"{symbol} {window_size}: no candles"
+                            if any(
+                                value is None
+                                for value in (
+                                    open_price,
+                                    high_price,
+                                    low_price,
+                                    close_price,
+                                    volume,
                                 )
-
-                            if result["null_ohlcv_count"] > 0:
+                            ):
                                 problems.append(
                                     f"{symbol} {window_size}: "
-                                    f"{result['null_ohlcv_count']} candles contain NULL OHLCV"
+                                    "candle contains NULL OHLCV"
                                 )
+                                continue
 
-                            if result["invalid_volume_count"] > 0:
+                            if volume <= 0:
                                 problems.append(
                                     f"{symbol} {window_size}: "
-                                    f"{result['invalid_volume_count']} candles have invalid volume"
+                                    "candle has invalid volume"
                                 )
 
-                            if result["invalid_ohlc_count"] > 0:
+                            if not (
+                                low_price <= open_price <= high_price
+                                and low_price <= close_price <= high_price
+                            ):
                                 problems.append(
                                     f"{symbol} {window_size}: "
-                                    f"{result['invalid_ohlc_count']} candles violate OHLC bounds"
+                                    "candle violates OHLC bounds"
                                 )
 
-                            if result["first_window_start"] < session_open:
+                            if window_start < session_open:
                                 problems.append(
-                                    f"{symbol} {window_size}: candle starts before session"
+                                    f"{symbol} {window_size}: "
+                                    "candle starts before session"
                                 )
 
-                            if result["last_window_end"] > session_close:
+                            if window_end > session_close:
                                 problems.append(
-                                    f"{symbol} {window_size}: candle ends after session"
+                                    f"{symbol} {window_size}: "
+                                    "candle ends after session"
+                                )
+
+                        for window_size in expected_window_sizes:
+                            expected = expected_windows[
+                                symbol
+                            ][window_size]
+
+                            actual = actual_windows[
+                                window_size
+                            ]
+
+                            missing, unexpected = compare_windows(
+                                expected,
+                                actual,
+                            )
+
+                            if missing:
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    f"missing {len(missing)} of "
+                                    f"{len(expected)} expected candles"
+                                )
+
+                            if unexpected:
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    f"contains {len(unexpected)} "
+                                    "unexpected candles"
                                 )
 
             if not problems:
@@ -636,6 +690,7 @@ def market_backfill():
 
     postgres_validation = validate_postgres_backfill(
         session=session,
+        validated_dataset=validated_dataset,
     )
 
     validated_dataset >> start_offsets

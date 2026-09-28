@@ -35,7 +35,7 @@ def parse_trade(message):
 
 
 class TradeTimestampAssigner:
-    """Extract event time from a processed trade tuple."""
+    """Extract event time from a parsed canonical trade tuple."""
 
     def extract_timestamp(self, trade, record_timestamp):
         return trade[3]

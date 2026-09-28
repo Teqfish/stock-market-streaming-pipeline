@@ -21,7 +21,6 @@ from processing import (
     to_json,
 )
 
-
 BROKER = "redpanda:29092"
 SOURCE_TOPIC = "trades.raw"
 SINK_TOPIC = "candles"

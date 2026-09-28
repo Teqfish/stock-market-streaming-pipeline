@@ -97,6 +97,7 @@ backfill:
 test:
 	docker compose run --rm \
 		-v "$(CURDIR)/tests:/app/tests:ro" \
+		-v "$(CURDIR)/airflow/dags:/app/airflow/dags:ro" \
 		-e PYTHONPATH=/app/src \
 		producer \
 		python -m unittest discover -s /app/tests -v
