@@ -3,6 +3,7 @@ from pyflink.common.serialization import SimpleStringSchema
 from pyflink.datastream import StreamExecutionEnvironment
 from pyflink.datastream.connectors.kafka import (
     KafkaOffsetsInitializer,
+    KafkaOffsetResetStrategy,
     KafkaRecordSerializationSchema,
     KafkaSink,
     KafkaSource,
@@ -38,7 +39,11 @@ def main():
         .set_bootstrap_servers(BROKER)
         .set_topics(SOURCE_TOPIC)
         .set_group_id("flink-candles")
-        .set_starting_offsets(KafkaOffsetsInitializer.earliest())
+        .set_starting_offsets(
+            KafkaOffsetsInitializer.committed_offsets(
+                KafkaOffsetResetStrategy.LATEST
+            )
+        )
         .set_value_only_deserializer(SimpleStringSchema())
         .build()
     )

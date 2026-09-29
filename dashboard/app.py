@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import psycopg2
 import streamlit as st
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 from plotly.subplots import make_subplots
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
@@ -24,13 +25,17 @@ GAMMAN_SYMBOLS = [
     "NVDA",
 ]
 
-
 AIRFLOW_API_URL = os.getenv(
     "AIRFLOW_API_URL",
     "http://airflow-api-server:8080",
 )
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "airflow")
 AIRFLOW_PASSWORDS_FILE = "/run/secrets/airflow_passwords.json"
+
+NEW_YORK_TZ = ZoneInfo("America/New_York")
+
+def get_current_market_date():
+    return datetime.now(NEW_YORK_TZ).date()
 
 
 st.set_page_config(
@@ -89,6 +94,85 @@ def trigger_backfill(symbol, trading_date):
 
     with urllib.request.urlopen(request, timeout=10) as response:
         return json.load(response)
+
+
+def get_backfill_runs(limit=20):
+    """Return recent market_backfill DAG runs from Airflow."""
+    token = get_airflow_token()
+
+    request = urllib.request.Request(
+        (
+            f"{AIRFLOW_API_URL}/api/v2/dags/market_backfill/dagRuns"
+            f"?limit={limit}&order_by=-logical_date"
+        ),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+
+    with urllib.request.urlopen(request, timeout=10) as response:
+        payload = json.load(response)
+
+    runs = []
+
+    for dag_run in payload.get("dag_runs", []):
+        conf = dag_run.get("conf") or {}
+        symbols = conf.get("symbols") or []
+        trading_date = conf.get("trading_date")
+
+        if not symbols or not trading_date:
+            continue
+
+        runs.append(
+            {
+                "dag_run_id": dag_run["dag_run_id"],
+                "symbol": symbols[0],
+                "trading_date": date.fromisoformat(trading_date),
+                "state": dag_run.get("state", "unknown"),
+                "logical_date": dag_run.get("logical_date"),
+            }
+        )
+
+    return runs
+
+
+def get_active_backfill(backfill_runs, symbol, trading_date):
+    """Return an active run for this symbol/date, if one exists."""
+    active_states = {"queued", "running"}
+
+    for run in backfill_runs:
+        if (
+            run["symbol"] == symbol
+            and run["trading_date"] == trading_date
+            and run["state"] in active_states
+        ):
+            return run
+
+    return None
+
+
+def session_exists(symbol, session_date):
+    """Return whether regular-session 1m candles exist locally."""
+    query = """
+        SELECT EXISTS (
+            SELECT 1
+            FROM candles
+            WHERE symbol = %s
+              AND window_size = '1m'
+              AND (window_start AT TIME ZONE 'America/New_York')::date = %s
+              AND (window_start AT TIME ZONE 'America/New_York')::time
+                    >= TIME '09:30'
+              AND (window_start AT TIME ZONE 'America/New_York')::time
+                    < TIME '16:00'
+        );
+    """
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query, (symbol, session_date))
+            return cursor.fetchone()[0]
 
 
 def get_connection():
@@ -247,7 +331,11 @@ def get_session_metrics(symbol, session_date):
     }
 
 
-def create_market_chart(dataframe):
+def create_market_chart(
+    live_dataframe=None,
+    historical_dataframe=None,
+    historical_date=None,
+):
     figure = make_subplots(
         rows=2,
         cols=1,
@@ -256,67 +344,195 @@ def create_market_chart(dataframe):
         row_heights=[0.75, 0.25],
     )
 
-    figure.add_trace(
-        go.Candlestick(
-            x=dataframe["window_start"],
-            open=dataframe["open"],
-            high=dataframe["high"],
-            low=dataframe["low"],
-            close=dataframe["close"],
-            name="Price",
-            increasing_line_color="#007700",
-            decreasing_line_color="#770000",
-            increasing_fillcolor="#096009",
-            decreasing_fillcolor="#600909",
-            opacity=1,
-            whiskerwidth=0.66,
-        ),
-        row=1,
-        col=1,
-    )
+    reference_date = pd.Timestamp("2000-01-01")
 
-    figure.add_trace(
-        go.Scatter(
-            x=dataframe["window_start"],
-            y=dataframe["sma_5"],
-            mode="lines",
-            name="SMA 5",
-            line=dict(color="#359EFF"),
-            opacity=0.9,
-        ),
-        row=1,
-        col=1,
-    )
+    def add_plot_time(dataframe):
+        dataframe = dataframe.copy()
 
-    figure.add_trace(
-        go.Scatter(
-            x=dataframe["window_start"],
-            y=dataframe["sma_20"],
-            mode="lines",
-            name="SMA 20",
-            line=dict(color="#1E36D1"),
-            opacity=0.7,
-        ),
-        row=1,
-        col=1,
-    )
+        market_time = (
+            pd.to_datetime(
+                dataframe["window_start"],
+                utc=True,
+            )
+            .dt.tz_convert("America/New_York")
+        )
 
-    figure.add_trace(
-        go.Bar(
-            x=dataframe["window_start"],
-            y=dataframe["volume"],
-            name="Volume",
-            marker_color="deepskyblue",
-            opacity=0.6,
-        ),
-        row=2,
-        col=1,
-    )
+        dataframe["plot_time"] = (
+            reference_date
+            + pd.to_timedelta(market_time.dt.hour, unit="h")
+            + pd.to_timedelta(market_time.dt.minute, unit="m")
+            + pd.to_timedelta(market_time.dt.second, unit="s")
+        )
+
+        return dataframe
+
+    # --------------------------------------
+    # Historical session — background layer
+    # --------------------------------------
+
+    if (
+        historical_dataframe is not None
+        and not historical_dataframe.empty
+    ):
+        historical = add_plot_time(historical_dataframe)
+
+        historical_volume_colors = [
+            "rgba(70, 130, 255, 0.35)"
+            if close >= open_
+            else "rgba(145, 80, 210, 0.35)"
+            for open_, close in zip(
+                historical["open"],
+                historical["close"],
+            )
+        ]
+
+        historical_label = (
+            historical_date.strftime("%d %b")
+            if historical_date
+            else "Historical"
+        )
+
+        figure.add_trace(
+            go.Candlestick(
+                x=historical["plot_time"],
+                open=historical["open"],
+                high=historical["high"],
+                low=historical["low"],
+                close=historical["close"],
+                name=f"{historical_label} price",
+                increasing_line_color="rgba(70, 130, 255, 0.55)",
+                decreasing_line_color="rgba(145, 80, 210, 0.55)",
+                increasing_fillcolor="rgba(70, 130, 255, 0.35)",
+                decreasing_fillcolor="rgba(145, 80, 210, 0.35)",
+                opacity=0.65,
+                whiskerwidth=0.66,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=historical["plot_time"],
+                y=historical["sma_5"],
+                mode="lines",
+                name=f"{historical_label} SMA 5",
+                line=dict(
+                    color="rgba(100, 160, 255, 0.55)",
+                ),
+                connectgaps=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=historical["plot_time"],
+                y=historical["sma_20"],
+                mode="lines",
+                name=f"{historical_label} SMA 20",
+                line=dict(
+                    color="rgba(150, 100, 220, 0.50)",
+                ),
+                connectgaps=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Bar(
+                x=historical["plot_time"],
+                y=historical["volume"],
+                name=f"{historical_label} volume",
+                marker_color=historical_volume_colors,
+            ),
+            row=2,
+            col=1,
+        )
+
+    # -------------------------------
+    # Live session — foreground layer
+    # -------------------------------
+
+    if live_dataframe is not None and not live_dataframe.empty:
+        live = add_plot_time(live_dataframe)
+
+        live_volume_colors = [
+            "#096009"
+            if close >= open_
+            else "#600909"
+            for open_, close in zip(
+                live["open"],
+                live["close"],
+            )
+        ]
+
+        figure.add_trace(
+            go.Candlestick(
+                x=live["plot_time"],
+                open=live["open"],
+                high=live["high"],
+                low=live["low"],
+                close=live["close"],
+                name="Live price",
+                increasing_line_color="#007700",
+                decreasing_line_color="#770000",
+                increasing_fillcolor="#096009",
+                decreasing_fillcolor="#600909",
+                opacity=1,
+                whiskerwidth=0.66,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=live["plot_time"],
+                y=live["sma_5"],
+                mode="lines",
+                name="Live SMA 5",
+                line=dict(color="#359EFF"),
+                opacity=0.9,
+                connectgaps=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=live["plot_time"],
+                y=live["sma_20"],
+                mode="lines",
+                name="Live SMA 20",
+                line=dict(color="#1E36D1"),
+                opacity=0.7,
+                connectgaps=False,
+            ),
+            row=1,
+            col=1,
+        )
+
+        figure.add_trace(
+            go.Bar(
+                x=live["plot_time"],
+                y=live["volume"],
+                name="Live volume",
+                marker_color=live_volume_colors,
+                opacity=0.6,
+            ),
+            row=2,
+            col=1,
+        )
 
     figure.update_layout(
         height=750,
         margin=dict(l=20, r=20, t=30, b=20),
         xaxis_rangeslider_visible=False,
+        barmode="overlay",
         legend=dict(
             orientation="h",
             yanchor="bottom",
@@ -326,13 +542,38 @@ def create_market_chart(dataframe):
         ),
     )
 
+    figure.update_xaxes(
+        type="date",
+        tickformat="%H:%M",
+        title_text="New York market time",
+        row=2,
+        col=1,
+    )
+
     return figure
+
 
 ## ======================================
 ## RENDER DASHBOARD
 ## ======================================
 
 st.title("Streams of GAMMAN")
+#st.html(
+#    '''<style> div.c {text-indent: 10.1%;}</style>
+#    <body>
+#        <h1>Streams of GOOGL
+#            <div class='c'>AAPL
+#            </div>
+#            <div class='c'>META
+#            </div>
+#            <div class='c'>MSFT
+#            </div>
+#            <div class='c'>AMZN
+#            </div>
+#            <div class='c'>NVDA
+#            </div>
+#        </h1>
+#    </body>''')
 st.caption("Real-time stock market streaming pipeline")
 
 symbols = get_symbols()
@@ -341,7 +582,7 @@ if not symbols:
     st.warning("No candle data is currently available.")
     st.stop()
 
-controls = st.columns(4)
+controls = st.columns([1, 1.4, 1, 1, 1])
 
 with controls[0]:
     symbol = st.selectbox(
@@ -351,6 +592,13 @@ with controls[0]:
     )
 
 with controls[1]:
+    session_date = st.date_input(
+        "Historical session",
+        value=date.today(),
+        max_value=date.today(),
+    )
+
+with controls[2]:
     window_size = st.segmented_control(
         "Window",
         options=["1m", "5m", "15m"],
@@ -358,137 +606,360 @@ with controls[1]:
         required=True,
     )
 
-available_sessions = get_available_sessions(symbol)
-
-if not available_sessions:
-    st.warning(f"No trading sessions are available for {symbol}.")
-    st.stop()
-
-with controls[2]:
-    session_date = st.selectbox(
-        "Trading session",
-        available_sessions,
-        index=0,
-        format_func=lambda value: value.strftime("%a %d %b %Y"),
+with controls[3]:
+    show_live_session = st.toggle(
+        "Show live session",
+        value=False,
     )
 
-with controls[3]:
-    cal_date = st.date_input("Trading Date","today")
-
-backfiller = st.columns(2)
-
-with backfiller[0]:
-    with st.expander("Backfill historical data"):
-        st.caption(
-            "Recover historical market data for a completed trading session. "
-            "Backfills are limited to one trading day per run."
-        )
-
-        backfill_col_1, backfill_col_2 = st.columns(2)
-
-        with backfill_col_1:
-            backfill_symbol = st.selectbox(
-                "Ticker",
-                symbols,
-                key="backfill_symbol",
-            )
-
-        with backfill_col_2:
-            backfill_date = st.date_input(
-                "Trading date",
-                value=date.today(),
-                max_value=date.today(),
-                key="backfill_date",
-            )
-
-        if st.button("Run backfill"):
-            try:
-                result = trigger_backfill(
-                    backfill_symbol,
-                    backfill_date,
-                )
-
-                st.success(
-                    f"Backfill started for {backfill_symbol} "
-                    f"on {backfill_date.isoformat()}."
-                )
-
-            except urllib.error.HTTPError as exc:
-                error_body = exc.read().decode()
-                st.error(
-                    f"Airflow rejected the backfill request "
-                    f"(HTTP {exc.code}): {error_body}"
-                )
-
-            except Exception as exc:
-                st.error(f"Could not start backfill: {exc}")
-
+with controls[4]:
+    show_historical_session = st.toggle(
+        "Show historical session",
+        value=True,
+    )
 
 @st.fragment(run_every="10s")
-def render_dashboard(symbol, window_size, session_date):
-    candles = get_candles_for_session(
-        symbol=symbol,
-        window_size=window_size,
-        session_date=session_date,
-    )
+def render_backfill_controls(
+    symbol,
+    session_date,
+    show_historical_session,
+):
+    try:
+        backfill_runs = get_backfill_runs()
+    except Exception as exc:
+        st.warning(f"Could not retrieve Airflow backfill status: {exc}")
+        backfill_runs = []
 
-    session_metrics = get_session_metrics(
+    local_session_exists = session_exists(
         symbol,
         session_date,
     )
 
-    if candles.empty:
-        st.info(f"No {window_size} candles are available for {symbol}.")
-        return
-
-    if session_metrics is None:
-        st.warning("No regular-session data is currently available.")
-        return
-
-    latest_price = session_metrics["latest_price"]
-    session_open = session_metrics["session_open"]
-
-    price_change = latest_price - session_open
-    price_change_percent = (
-        price_change / session_open * 100
-        if session_open
-        else None
+    active_backfill = get_active_backfill(
+        backfill_runs,
+        symbol,
+        session_date,
     )
 
-    metric_columns = st.columns(4)
+    if show_historical_session:
+        if active_backfill is not None:
+            state = active_backfill["state"]
 
-    metric_columns[0].metric(
-        "Latest price",
-        f"${latest_price:,.2f}",
-        f"{price_change:+.2f} ({price_change_percent:+.2f}%)",
-    )
+            if state == "running":
+                st.info(
+                    f"Backfill in progress for {symbol} on "
+                    f"{session_date.strftime('%a %d %b %Y')}. "
+                    "Historical data normally takes about 45 seconds "
+                    "to become available."
+                )
+            else:
+                st.info(
+                    f"Backfill queued for {symbol} on "
+                    f"{session_date.strftime('%a %d %b %Y')}."
+                )
 
-    metric_columns[1].metric(
-        "Session high",
-        f"${session_metrics['session_high']:,.2f}",
-    )
+        else:
+            if local_session_exists:
+                button_label = "Rerun Backfill"
+            else:
+                st.info(
+                    f"No local data is available for {symbol} on "
+                    f"{session_date.strftime('%a %d %b %Y')}."
+                )
+                button_label = "Run Backfill"
 
-    metric_columns[2].metric(
-        "Session low",
-        f"${session_metrics['session_low']:,.2f}",
-    )
+            if st.button(
+                button_label,
+                key=f"backfill_{symbol}_{session_date.isoformat()}",
+            ):
+                try:
+                    trigger_backfill(
+                        symbol,
+                        session_date,
+                    )
 
-    metric_columns[3].metric(
-        "IEX session volume",
-        f"{session_metrics['session_volume']:,.0f}",
-    )
+                    if local_session_exists:
+                        st.success(
+                            f"Backfill rerun requested for {symbol} on "
+                            f"{session_date.strftime('%a %d %b %Y')}."
+                        )
+                    else:
+                        st.success(
+                            f"Backfill requested for {symbol} on "
+                            f"{session_date.strftime('%a %d %b %Y')}."
+                        )
 
-    st.plotly_chart(
-        create_market_chart(candles),
-        width="stretch",
-    )
+                    st.rerun(scope="fragment")
 
-    with st.expander("Candle data"):
-        st.dataframe(
-            candles.sort_values("window_start", ascending=False),
-            width="stretch",
-            hide_index=True,
+                except urllib.error.HTTPError as exc:
+                    error_body = exc.read().decode()
+                    st.error(
+                        f"Airflow rejected the backfill request "
+                        f"(HTTP {exc.code}): {error_body}"
+                    )
+
+                except Exception as exc:
+                    st.error(f"Could not start backfill: {exc}")
+
+    active_runs = [
+        run
+        for run in backfill_runs
+        if run["state"] in {"queued", "running"}
+    ]
+
+    if active_runs:
+        running_count = sum(
+            run["state"] == "running"
+            for run in active_runs
+        )
+        queued_count = sum(
+            run["state"] == "queued"
+            for run in active_runs
         )
 
+        with st.expander(
+            f"Backfills ({running_count} running, {queued_count} queued)"
+        ):
+            queue_data = pd.DataFrame(
+                [
+                    {
+                        "Status": run["state"].title(),
+                        "Ticker": run["symbol"],
+                        "Trading session": run[
+                            "trading_date"
+                        ].strftime("%a %d %b %Y"),
+                    }
+                    for run in active_runs
+                ]
+            )
 
-render_dashboard(symbol, window_size, session_date)
+            st.dataframe(
+                queue_data,
+                width="stretch",
+                hide_index=True,
+            )
+
+
+render_backfill_controls(
+    symbol,
+    session_date,
+    show_historical_session,
+)
+
+
+@st.fragment(run_every="10s")
+def render_dashboard(
+    symbol,
+    window_size,
+    historical_date,
+    show_live_session,
+    show_historical_session,
+):
+    live_date = get_current_market_date()
+
+    live_candles = pd.DataFrame()
+    historical_candles = pd.DataFrame()
+
+    live_metrics = None
+    historical_metrics = None
+
+    if show_live_session:
+        live_candles = get_candles_for_session(
+            symbol=symbol,
+            window_size=window_size,
+            session_date=live_date,
+        )
+
+        live_metrics = get_session_metrics(
+            symbol,
+            live_date,
+        )
+
+    if show_historical_session:
+        historical_candles = get_candles_for_session(
+            symbol=symbol,
+            window_size=window_size,
+            session_date=historical_date,
+        )
+
+        historical_metrics = get_session_metrics(
+            symbol,
+            historical_date,
+        )
+
+    # --------------------------------------
+    # Live scorecards
+    # --------------------------------------
+
+    if show_live_session:
+        st.subheader(
+            f"Live session — "
+            f"{live_date.strftime('%a %d %b %Y')}"
+        )
+
+        if live_metrics is None:
+            st.info(
+                f"No live regular-session data is currently available "
+                f"for {symbol}."
+            )
+        else:
+            latest_price = live_metrics["latest_price"]
+            session_open = live_metrics["session_open"]
+
+            price_change = latest_price - session_open
+            price_change_percent = (
+                price_change / session_open * 100
+                if session_open
+                else None
+            )
+
+            live_columns = st.columns(4)
+
+            live_columns[0].metric(
+                "Latest price",
+                f"${latest_price:,.2f}",
+                (
+                    f"{price_change:+.2f} "
+                    f"({price_change_percent:+.2f}%)"
+                ),
+            )
+
+            live_columns[1].metric(
+                "Session high",
+                f"${live_metrics['session_high']:,.2f}",
+            )
+
+            live_columns[2].metric(
+                "Session low",
+                f"${live_metrics['session_low']:,.2f}",
+            )
+
+            live_columns[3].metric(
+                "IEX session volume",
+                f"{live_metrics['session_volume']:,.0f}",
+            )
+
+    # --------------------------------------
+    # Historical scorecards
+    # --------------------------------------
+
+    if show_historical_session:
+        st.subheader(
+            f"Historical session — "
+            f"{historical_date.strftime('%a %d %b %Y')}"
+        )
+
+        if historical_metrics is None:
+            st.info(
+                f"No historical regular-session data is currently "
+                f"available for {symbol} on "
+                f"{historical_date.strftime('%a %d %b %Y')}."
+            )
+        else:
+            historical_close = historical_metrics["latest_price"]
+            historical_open = historical_metrics["session_open"]
+
+            price_change = historical_close - historical_open
+            price_change_percent = (
+                price_change / historical_open * 100
+                if historical_open
+                else None
+            )
+
+            historical_columns = st.columns(4)
+
+            historical_columns[0].metric(
+                "Close",
+                f"${historical_close:,.2f}",
+                (
+                    f"{price_change:+.2f} "
+                    f"({price_change_percent:+.2f}%)"
+                ),
+            )
+
+            historical_columns[1].metric(
+                "Session high",
+                f"${historical_metrics['session_high']:,.2f}",
+            )
+
+            historical_columns[2].metric(
+                "Session low",
+                f"${historical_metrics['session_low']:,.2f}",
+            )
+
+            historical_columns[3].metric(
+                "IEX session volume",
+                f"{historical_metrics['session_volume']:,.0f}",
+            )
+
+    # --------------------------------------
+    # Chart
+    # --------------------------------------
+
+    has_live_data = not live_candles.empty
+    has_historical_data = not historical_candles.empty
+
+    if has_live_data or has_historical_data:
+        st.plotly_chart(
+            create_market_chart(
+                live_dataframe=(
+                    live_candles
+                    if has_live_data
+                    else None
+                ),
+                historical_dataframe=(
+                    historical_candles
+                    if has_historical_data
+                    else None
+                ),
+                historical_date=historical_date,
+            ),
+            width="stretch",
+        )
+
+    elif not show_live_session and not show_historical_session:
+        st.info(
+            "Enable the live or historical session to display market data."
+        )
+
+    # --------------------------------------
+    # Raw candle data
+    # --------------------------------------
+
+    if has_live_data or has_historical_data:
+        with st.expander("Candle data"):
+            if has_live_data:
+                st.caption(
+                    f"Live — {live_date.strftime('%a %d %b %Y')}"
+                )
+                st.dataframe(
+                    live_candles.sort_values(
+                        "window_start",
+                        ascending=False,
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            if has_historical_data:
+                st.caption(
+                    f"Historical — "
+                    f"{historical_date.strftime('%a %d %b %Y')}"
+                )
+                st.dataframe(
+                    historical_candles.sort_values(
+                        "window_start",
+                        ascending=False,
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+
+render_dashboard(
+    symbol,
+    window_size,
+    session_date,
+    show_live_session,
+    show_historical_session,
+)
