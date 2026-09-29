@@ -10,11 +10,12 @@ from pyflink.datastream.connectors.kafka import (
     KafkaRecordSerializationSchema,
     KafkaSink,
     KafkaSource,
+    KafkaTopicPartition
 )
-from pyflink.datastream.connectors.kafka import KafkaTopicPartition
 
 from processing import (
     DeduplicateTrade,
+    MovingAverageProcessFunction,
     TradeTimestampAssigner,
     build_candles,
     parse_trade,
@@ -38,12 +39,22 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--start",
+        "--processing-start",
         required=True,
     )
 
     parser.add_argument(
-        "--end",
+        "--processing-end",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--requested-start",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--requested-end",
         required=True,
     )
 
@@ -93,8 +104,29 @@ def main():
         for symbol in args.symbols
     }
 
-    start_timestamp = parse_timestamp(args.start)
-    end_timestamp = parse_timestamp(args.end)
+    processing_start_timestamp = parse_timestamp(
+        args.processing_start
+    )
+    processing_end_timestamp = parse_timestamp(
+        args.processing_end
+    )
+    requested_start_timestamp = parse_timestamp(
+        args.requested_start
+    )
+    requested_end_timestamp = parse_timestamp(
+        args.requested_end
+    )
+
+    if not (
+        processing_start_timestamp
+        <= requested_start_timestamp
+        < requested_end_timestamp
+        <= processing_end_timestamp
+    ):
+        raise ValueError(
+            "Requested range must fall within "
+            "the processing range"
+        )
 
     start_offsets = json.loads(args.start_offsets)
     end_offsets = json.loads(args.end_offsets)
@@ -164,12 +196,12 @@ def main():
             lambda trade: (
                 trade[1] == "historical"
                 and trade[2] in symbols
-                and start_timestamp
+                and processing_start_timestamp
                 <= trade[5]
-                < end_timestamp
+                < processing_end_timestamp
             )
         )
-        .name("Requested Historical Trades")
+        .name("Historical Processing Range")
     )
 
     unique_trades = (
@@ -221,12 +253,42 @@ def main():
         15,
     )
 
-    candles = (
+    windowed_candles = (
         candles_1m
         .union(
             candles_5m,
             candles_15m,
         )
+    )
+
+    candles_with_sma = (
+        windowed_candles
+        .key_by(
+            lambda candle: (
+                candle["symbol"],
+                candle["window_size"],
+            )
+        )
+        .process(
+            MovingAverageProcessFunction()
+        )
+        .name("Historical Moving Averages")
+    )
+
+    requested_candles = (
+        candles_with_sma
+        .filter(
+            lambda candle: (
+                requested_start_timestamp
+                <= candle["window_start"]
+                < requested_end_timestamp
+            )
+        )
+        .name("Requested Session Candles")
+    )
+
+    candles = (
+        requested_candles
         .map(
             to_json,
             output_type=Types.STRING(),

@@ -21,7 +21,6 @@ from backfill_validation import (
 
 
 MARKET_CALENDAR = "XNYS"
-MAX_BACKFILL_DAYS = 5
 BACKFILL_DATA_DIR = Path("/opt/airflow/data/backfills")
 REDPANDA_BROKER = os.environ.get(
     "REDPANDA_BROKER",
@@ -138,12 +137,6 @@ def market_backfill():
                 "trading session has not finished yet"
             )
 
-        if (now - start).days > MAX_BACKFILL_DAYS:
-            raise AirflowFailException(
-                f"trading session cannot be more than "
-                f"{MAX_BACKFILL_DAYS} days ago"
-            )
-
         return {
             "symbols": request["symbols"],
             "trading_date": trading_date,
@@ -152,24 +145,55 @@ def market_backfill():
         }
 
     @task
-    def fetch_historical_trades(request, **context):
+    def resolve_processing_range(session: dict) -> dict:
+        """Extend the requested session with a preceding XNYS session for SMA warm-up."""
+
+        calendar = xcals.get_calendar("XNYS")
+
+        requested_start = parse_timestamp(
+            session["start"]
+        )
+
+        requested_label = calendar.date_to_session(
+            requested_start.date(),
+            direction="none",
+        )
+
+        warmup_label = calendar.previous_session(
+            requested_label
+        )
+
+        warmup_open = calendar.session_open(
+            warmup_label
+        ).to_pydatetime()
+
+        return {
+            "symbols": session["symbols"],
+            "start": warmup_open.isoformat(),
+            "end": session["end"],
+            "requested_start": session["start"],
+            "requested_end": session["end"],
+        }
+
+    @task
+    def fetch_historical_trades(
+        processing_range: dict,
+        **context,
+    ) -> dict:
         run_id = context["run_id"]
 
-        api_key = os.environ.get("ALPACA_API_KEY")
-        secret_key = os.environ.get("ALPACA_SECRET_KEY")
+        start = parse_timestamp(
+            processing_range["start"]
+        )
 
-        if not api_key or not secret_key:
-            raise AirflowFailException(
-                "Alpaca API credentials are not configured"
-            )
-
-        start = parse_timestamp(request["start"])
-        end = parse_timestamp(request["end"])
+        end = parse_timestamp(
+            processing_range["end"]
+        )
 
         events = get_historical_events(
-            api_key=api_key,
-            secret_key=secret_key,
-            symbols=request["symbols"],
+            api_key=os.environ["ALPACA_API_KEY"],
+            secret_key=os.environ["ALPACA_SECRET_KEY"],
+            symbols=processing_range["symbols"],
             start=start,
             end=end,
         )
@@ -202,7 +226,10 @@ def market_backfill():
         }
 
     @task
-    def validate_historical_trades(request, dataset):
+    def validate_historical_trades(
+        processing_range,
+        dataset,
+    ):
         path = Path(dataset["path"])
 
         if not path.exists():
@@ -219,9 +246,15 @@ def market_backfill():
                 "between fetch and validation"
             )
 
-        requested_symbols = set(request["symbols"])
-        start = parse_timestamp(request["start"])
-        end = parse_timestamp(request["end"])
+        requested_symbols = set(
+            processing_range["symbols"]
+        )
+        start = parse_timestamp(
+            processing_range["start"]
+        )
+        end = parse_timestamp(
+            processing_range["end"]
+        )
 
         seen_event_ids = set()
 
@@ -275,7 +308,7 @@ def market_backfill():
             if not start <= timestamp < end:
                 raise AirflowFailException(
                     f"event {index} falls outside the "
-                    "requested interval"
+                    "processing interval"
                 )
 
             if (
@@ -315,8 +348,14 @@ def market_backfill():
             "path": str(path),
             "event_count": len(events),
             "symbols": sorted(requested_symbols),
-            "start": request["start"],
-            "end": request["end"],
+            "start": processing_range["start"],
+            "end": processing_range["end"],
+            "requested_start": processing_range[
+                "requested_start"
+            ],
+            "requested_end": processing_range[
+                "requested_end"
+            ],
         }
 
     @task
@@ -418,12 +457,15 @@ def market_backfill():
     @task
     def run_bounded_flink_backfill(
         session,
+        processing_range,
         offset_range,
     ):
         payload = {
             "symbols": session["symbols"],
-            "start": session["start"],
-            "end": session["end"],
+            "processing_start": processing_range["start"],
+            "processing_end": processing_range["end"],
+            "requested_start": session["start"],
+            "requested_end": session["end"],
             "start_offsets": offset_range["start_offsets"],
             "end_offsets": offset_range["end_offsets"],
         }
@@ -483,10 +525,16 @@ def market_backfill():
         """Wait for reconstructed candles to reach PostgreSQL and validate them."""
 
         symbols = session["symbols"]
-        session_open = datetime.fromisoformat(session["start"])
-        session_close = datetime.fromisoformat(session["end"])
+        session_open = datetime.fromisoformat(
+            session["start"]
+        )
+        session_close = datetime.fromisoformat(
+            session["end"]
+        )
 
-        dataset_path = Path(validated_dataset["path"])
+        dataset_path = Path(
+            validated_dataset["path"]
+        )
 
         if not dataset_path.exists():
             raise AirflowFailException(
@@ -497,25 +545,64 @@ def market_backfill():
         with dataset_path.open() as file:
             events = json.load(file)
 
+        requested_events = []
+
+        for event in events:
+            event_timestamp = parse_timestamp(
+                event["event_timestamp"]
+            )
+
+            if (
+                session_open
+                <= event_timestamp
+                < session_close
+            ):
+                requested_events.append(event)
+
+        if not requested_events:
+            raise AirflowFailException(
+                "Validated historical dataset contains no "
+                "events in the requested session"
+            )
+
         try:
             expected_windows = build_expected_windows(
-                events,
+                requested_events,
                 symbols,
             )
         except ValueError as exc:
-            raise AirflowFailException(str(exc)) from exc
+            raise AirflowFailException(
+                str(exc)
+            ) from exc
 
-        expected_window_sizes = set(WINDOW_MINUTES)
+        expected_window_sizes = set(
+            WINDOW_MINUTES
+        )
+
         timeout_seconds = 60
         poll_interval_seconds = 2
-        deadline = time.monotonic() + timeout_seconds
+        deadline = (
+            time.monotonic()
+            + timeout_seconds
+        )
 
         connection_kwargs = {
-            "host": os.environ["PIPELINE_POSTGRES_HOST"],
-            "port": os.environ.get("PIPELINE_POSTGRES_PORT", "5432"),
-            "dbname": os.environ["PIPELINE_POSTGRES_DB"],
-            "user": os.environ["PIPELINE_POSTGRES_USER"],
-            "password": os.environ["PIPELINE_POSTGRES_PASSWORD"],
+            "host": os.environ[
+                "PIPELINE_POSTGRES_HOST"
+            ],
+            "port": os.environ.get(
+                "PIPELINE_POSTGRES_PORT",
+                "5432",
+            ),
+            "dbname": os.environ[
+                "PIPELINE_POSTGRES_DB"
+            ],
+            "user": os.environ[
+                "PIPELINE_POSTGRES_USER"
+            ],
+            "password": os.environ[
+                "PIPELINE_POSTGRES_PASSWORD"
+            ],
         }
 
         query = """
@@ -527,7 +614,9 @@ def market_backfill():
                 high,
                 low,
                 close,
-                volume
+                volume,
+                sma_5,
+                sma_20
             FROM candles
             WHERE symbol = %s
             AND window_start >= %s
@@ -538,19 +627,26 @@ def market_backfill():
         while True:
             problems = []
 
-            with psycopg2.connect(**connection_kwargs) as conn:
+            with psycopg2.connect(
+                **connection_kwargs
+            ) as conn:
                 with conn.cursor() as cursor:
                     for symbol in symbols:
                         cursor.execute(
                             query,
-                            (symbol, session_open, session_close),
+                            (
+                                symbol,
+                                session_open,
+                                session_close,
+                            ),
                         )
 
                         rows = cursor.fetchall()
 
                         actual_windows = {
                             window_size: set()
-                            for window_size in expected_window_sizes
+                            for window_size
+                            in expected_window_sizes
                         }
 
                         for (
@@ -562,12 +658,19 @@ def market_backfill():
                             low_price,
                             close_price,
                             volume,
+                            sma_5,
+                            sma_20,
                         ) in rows:
 
-                            if window_size not in expected_window_sizes:
+                            if (
+                                window_size
+                                not in expected_window_sizes
+                            ):
                                 continue
 
-                            actual_windows[window_size].add(
+                            actual_windows[
+                                window_size
+                            ].add(
                                 window_start
                             )
 
@@ -587,6 +690,15 @@ def market_backfill():
                                 )
                                 continue
 
+                            if (
+                                sma_5 is None
+                                or sma_20 is None
+                            ):
+                                problems.append(
+                                    f"{symbol} {window_size}: "
+                                    "candle contains NULL SMA"
+                                )
+
                             if volume <= 0:
                                 problems.append(
                                     f"{symbol} {window_size}: "
@@ -594,36 +706,55 @@ def market_backfill():
                                 )
 
                             if not (
-                                low_price <= open_price <= high_price
-                                and low_price <= close_price <= high_price
+                                low_price
+                                <= open_price
+                                <= high_price
+                                and low_price
+                                <= close_price
+                                <= high_price
                             ):
                                 problems.append(
                                     f"{symbol} {window_size}: "
                                     "candle violates OHLC bounds"
                                 )
 
-                            if window_start < session_open:
+                            if (
+                                window_start
+                                < session_open
+                            ):
                                 problems.append(
                                     f"{symbol} {window_size}: "
                                     "candle starts before session"
                                 )
 
-                            if window_end > session_close:
+                            if (
+                                window_end
+                                > session_close
+                            ):
                                 problems.append(
                                     f"{symbol} {window_size}: "
                                     "candle ends after session"
                                 )
 
-                        for window_size in expected_window_sizes:
-                            expected = expected_windows[
-                                symbol
-                            ][window_size]
+                        for (
+                            window_size
+                        ) in expected_window_sizes:
+                            expected = (
+                                expected_windows[
+                                    symbol
+                                ][window_size]
+                            )
 
-                            actual = actual_windows[
-                                window_size
-                            ]
+                            actual = (
+                                actual_windows[
+                                    window_size
+                                ]
+                            )
 
-                            missing, unexpected = compare_windows(
+                            (
+                                missing,
+                                unexpected,
+                            ) = compare_windows(
                                 expected,
                                 actual,
                             )
@@ -632,43 +763,62 @@ def market_backfill():
                                 problems.append(
                                     f"{symbol} {window_size}: "
                                     f"missing {len(missing)} of "
-                                    f"{len(expected)} expected candles"
+                                    f"{len(expected)} "
+                                    "expected candles"
                                 )
 
                             if unexpected:
                                 problems.append(
                                     f"{symbol} {window_size}: "
-                                    f"contains {len(unexpected)} "
+                                    f"contains "
+                                    f"{len(unexpected)} "
                                     "unexpected candles"
                                 )
 
             if not problems:
                 print(
-                    "PostgreSQL backfill validation passed for "
+                    "PostgreSQL backfill validation "
+                    "passed for "
                     f"{', '.join(symbols)}."
                 )
                 return
 
-            if time.monotonic() >= deadline:
+            if (
+                time.monotonic()
+                >= deadline
+            ):
                 raise AirflowFailException(
-                    "PostgreSQL backfill validation failed after "
-                    f"{timeout_seconds}s: {'; '.join(problems)}"
+                    "PostgreSQL backfill validation "
+                    "failed after "
+                    f"{timeout_seconds}s: "
+                    f"{'; '.join(problems)}"
                 )
 
             print(
                 "PostgreSQL backfill not valid yet; "
-                f"retrying in {poll_interval_seconds}s: {'; '.join(problems)}"
+                f"retrying in "
+                f"{poll_interval_seconds}s: "
+                f"{'; '.join(problems)}"
+                )
+
+            time.sleep(
+                poll_interval_seconds
             )
-            time.sleep(poll_interval_seconds)
 
     request = validate_request()
 
     session = resolve_market_session(request)
 
-    dataset = fetch_historical_trades(session)
+    processing_range = resolve_processing_range(
+        session
+    )
+
+    dataset = fetch_historical_trades(
+        processing_range
+    )
 
     validated_dataset = validate_historical_trades(
-        session,
+        processing_range,
         dataset,
     )
 
@@ -685,6 +835,7 @@ def market_backfill():
 
     flink_backfill = run_bounded_flink_backfill(
         session,
+        processing_range,
         end_offsets,
     )
 

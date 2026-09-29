@@ -39,7 +39,6 @@ st.set_page_config(
     layout="wide",
 )
 
-
 def get_airflow_token():
     """Authenticate with Airflow and return a JWT access token."""
     with open(AIRFLOW_PASSWORDS_FILE) as f:
@@ -342,7 +341,7 @@ if not symbols:
     st.warning("No candle data is currently available.")
     st.stop()
 
-controls = st.columns(3)
+controls = st.columns(4)
 
 with controls[0]:
     symbol = st.selectbox(
@@ -372,6 +371,9 @@ with controls[2]:
         index=0,
         format_func=lambda value: value.strftime("%a %d %b %Y"),
     )
+
+with controls[3]:
+    cal_date = st.date_input("Trading Date","today")
 
 backfiller = st.columns(2)
 

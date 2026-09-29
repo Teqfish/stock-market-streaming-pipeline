@@ -26,8 +26,10 @@ def run_backfill():
 
     required_fields = {
         "symbols",
-        "start",
-        "end",
+        "processing_start",
+        "processing_end",
+        "requested_start",
+        "requested_end",
         "start_offsets",
         "end_offsets",
     }
@@ -40,8 +42,10 @@ def run_backfill():
         ), 400
 
     symbols = payload["symbols"]
-    start = payload["start"]
-    end = payload["end"]
+    processing_start = payload["processing_start"]
+    processing_end = payload["processing_end"]
+    requested_start = payload["requested_start"]
+    requested_end = payload["requested_end"]
     start_offsets = payload["start_offsets"]
     end_offsets = payload["end_offsets"]
 
@@ -51,8 +55,26 @@ def run_backfill():
     if not all(isinstance(symbol, str) and symbol for symbol in symbols):
         return jsonify({"error": "symbols must contain non-empty strings"}), 400
 
-    if not isinstance(start, str) or not isinstance(end, str):
-        return jsonify({"error": "start and end must be strings"}), 400
+    timestamps = {
+        "processing_start": processing_start,
+        "processing_end": processing_end,
+        "requested_start": requested_start,
+        "requested_end": requested_end,
+    }
+
+    if not all(
+        isinstance(value, str)
+        for value in timestamps.values()
+    ):
+        return jsonify(
+            {
+                "error": (
+                    "processing_start, processing_end, "
+                    "requested_start and requested_end "
+                    "must be strings"
+                )
+            }
+        ), 400
 
     if not isinstance(start_offsets, dict) or not isinstance(end_offsets, dict):
         return jsonify(
@@ -70,10 +92,14 @@ def run_backfill():
         PROCESSING_FILE,
         "--symbols",
         ",".join(symbols),
-        "--start",
-        start,
-        "--end",
-        end,
+        "--processing-start",
+        processing_start,
+        "--processing-end",
+        processing_end,
+        "--requested-start",
+        requested_start,
+        "--requested-end",
+        requested_end,
         "--start-offsets",
         json.dumps(start_offsets),
         "--end-offsets",

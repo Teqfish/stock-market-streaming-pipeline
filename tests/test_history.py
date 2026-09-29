@@ -61,7 +61,7 @@ class TestHistoricalEvents(unittest.TestCase):
 
         self.assertEqual(
             event["event_id"],
-            "alpaca:iex:NVDA:7453",
+            "alpaca:iex:NVDA:2026-09-21:7453",
         )
         self.assertEqual(event["trade_id"], 7453)
         self.assertEqual(event["symbol"], "NVDA")
