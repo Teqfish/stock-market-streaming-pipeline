@@ -93,6 +93,14 @@ class TestBackfillValidation(unittest.TestCase):
         expected = build_expected_windows(
             events,
             ["MSFT"],
+            datetime(
+                2026,
+                9,
+                25,
+                13,
+                45,
+                tzinfo=timezone.utc,
+            ),
         )
 
         self.assertEqual(
@@ -106,6 +114,51 @@ class TestBackfillValidation(unittest.TestCase):
         self.assertEqual(
             len(expected["MSFT"]["15m"]),
             1,
+        )
+
+    def test_partial_windows_after_requested_end_are_not_expected(self):
+        events = [
+            {
+                "symbol": "MSFT",
+                "event_timestamp": (
+                    "2026-09-25T13:37:20Z"
+                ),
+            },
+        ]
+
+        expected = build_expected_windows(
+            events,
+            ["MSFT"],
+            datetime(
+                2026,
+                9,
+                25,
+                13,
+                38,
+                tzinfo=timezone.utc,
+            ),
+        )
+
+        completed_1m_window = datetime(
+            2026,
+            9,
+            25,
+            13,
+            37,
+            tzinfo=timezone.utc,
+        )
+
+        self.assertEqual(
+            expected["MSFT"]["1m"],
+            {completed_1m_window},
+        )
+        self.assertEqual(
+            expected["MSFT"]["5m"],
+            set(),
+        )
+        self.assertEqual(
+            expected["MSFT"]["15m"],
+            set(),
         )
 
     def test_complete_reconstruction_has_no_differences(self):
@@ -215,6 +268,14 @@ class TestBackfillValidation(unittest.TestCase):
             build_expected_windows(
                 events,
                 ["MSFT"],
+                datetime(
+                    2026,
+                    9,
+                    25,
+                    14,
+                    0,
+                    tzinfo=timezone.utc,
+                ),
             )
 
 

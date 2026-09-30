@@ -8,7 +8,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth/simple_auth_manager_passwords.json
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: airflow:admin
     AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
@@ -26,13 +26,25 @@ x-airflow-common: &airflow-common
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
-    - ./airflow/auth/simple_auth_manager_passwords.json:/opt/airflow/simple_auth_manager_passwords.json
+    - airflow-auth:/opt/airflow/auth
     - ./airflow/data:/opt/airflow/data
   depends_on:
+    airflow-auth-init:
+      condition: service_completed_successfully
     airflow-postgres:
       condition: service_healthy
 
 services:
+  airflow-auth-init:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - chown -R 50000:0 /opt/airflow/auth && chmod 0770 /opt/airflow/auth
+    volumes:
+      - airflow-auth:/opt/airflow/auth
+    restart: "no"
+
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     command:
@@ -207,7 +219,10 @@ services:
   dashboard:
     build: ./dashboard
     depends_on:
-      - postgres
+      postgres:
+        condition: service_started
+      airflow-api-server:
+        condition: service_healthy
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
@@ -220,9 +235,10 @@ services:
       - "8501:8501"
     volumes:
       - ./dashboard:/app
-      - ./airflow/auth/simple_auth_manager_passwords.json:/run/secrets/airflow_passwords.json:ro
+      - airflow-auth:/run/secrets/airflow:ro
 
 volumes:
+  airflow-auth:
   redpanda-data:
   postgres-data:
   airflow-postgres-data:

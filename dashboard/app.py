@@ -30,7 +30,9 @@ AIRFLOW_API_URL = os.getenv(
     "http://airflow-api-server:8080",
 )
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME", "airflow")
-AIRFLOW_PASSWORDS_FILE = "/run/secrets/airflow_passwords.json"
+AIRFLOW_PASSWORDS_FILE = (
+    "/run/secrets/airflow/simple_auth_manager_passwords.json"
+)
 
 NEW_YORK_TZ = ZoneInfo("America/New_York")
 

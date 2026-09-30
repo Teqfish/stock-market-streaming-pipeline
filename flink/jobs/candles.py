@@ -26,7 +26,7 @@ SINK_TOPIC = "candles"
 
 def is_live_trade(trade):
     """Return True for records handled by the continuous pipeline."""
-    return trade[1] in ("", "live")
+    return trade[1] == "live"
 
 
 def main():
@@ -72,33 +72,8 @@ def main():
         is_live_trade
     ).name("Live Trades Only")
 
-    # Legacy records pre-date canonical event_id/source fields.
-    # Preserve compatibility until old development data is retired.
-    legacy_trades = (
+    unique_trades = (
         live_trades
-        .filter(lambda trade: trade[0] == "")
-        .map(
-            lambda trade: (
-                trade[2],
-                trade[3],
-                trade[4],
-                trade[5],
-            ),
-            output_type=Types.TUPLE(
-                [
-                    Types.STRING(),
-                    Types.DOUBLE(),
-                    Types.LONG(),
-                    Types.LONG(),
-                ]
-            ),
-        )
-        .name("Legacy Trades")
-    )
-
-    canonical_trades = (
-        live_trades
-        .filter(lambda trade: trade[0] != "")
         .key_by(lambda trade: trade[0])
         .process(
             DeduplicateTrade(),
@@ -113,8 +88,6 @@ def main():
         )
         .name("Deduplicate Trades")
     )
-
-    unique_trades = legacy_trades.union(canonical_trades)
 
     watermark_strategy = (
         WatermarkStrategy

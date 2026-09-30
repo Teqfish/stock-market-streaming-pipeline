@@ -3,7 +3,7 @@
 	up down build rebuild logs ps reset \
 	flink-build flink-up flink-down flink-restart flink-logs flink-submit flink-jobs \
 	airflow-up airflow-down airflow-restart airflow-logs \
-	backfill test
+	test
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -176,21 +176,6 @@ airflow-logs:
 		airflow-api-server \
 		airflow-scheduler \
 		airflow-dag-processor
-
-
-# ---------------------------------------------------------------------------
-# Historical data
-# ---------------------------------------------------------------------------
-
-backfill:
-	@test -n "$(SYMBOLS)" || (echo "SYMBOLS is required"; exit 1)
-	@test -n "$(START)" || (echo "START is required"; exit 1)
-	@test -n "$(END)" || (echo "END is required"; exit 1)
-	docker compose run --rm producer \
-		python src/historical.py \
-		--symbols $(SYMBOLS) \
-		--start "$(START)" \
-		--end "$(END)"
 
 
 # ---------------------------------------------------------------------------

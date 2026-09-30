@@ -20,8 +20,8 @@ def parse_trade(message):
     trade = json.loads(message)
 
     return (
-        trade.get("event_id", ""),
-        trade.get("source", ""),
+        trade["event_id"],
+        trade["source"],
         trade["symbol"],
         float(trade["price"]),
         int(trade["size"]),
