@@ -6,6 +6,10 @@ _A local end-to-end data pipeline for processing live and backfilled US stock-ma
 
 Streams of GAMMAN consumes live trades from Alpaca, streams them through Redpanda and PyFlink, calculates OHLCV candles and moving averages, and serves the results from PostgreSQL to an interactive Streamlit dashboard.
 
+Normal startup initializes the required local Redpanda topics, `trades.raw` and
+`candles`, with one partition and one replica each. This happens before
+topic-dependent services start, including when no live trades are arriving.
+
 Historical market sessions can also be requested directly from the dashboard and reconstructed through an Airflow-orchestrated bounded Flink pipeline. When the pipeline starts after the market has opened, it can automatically catch up the current session from market open while live processing continues.
 
 ## Architecture

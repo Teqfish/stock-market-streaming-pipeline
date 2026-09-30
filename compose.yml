@@ -33,6 +33,8 @@ x-airflow-common: &airflow-common
       condition: service_completed_successfully
     airflow-postgres:
       condition: service_healthy
+    redpanda-topic-init:
+      condition: service_completed_successfully
 
 services:
   airflow-auth-init:
@@ -63,6 +65,23 @@ services:
       - "9644:9644"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+
+  redpanda-topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until rpk -X brokers=redpanda:29092 topic list > /dev/null 2>&1; do
+          sleep 1
+        done
+        rpk -X brokers=redpanda:29092 topic create \
+          --if-not-exists \
+          --partitions 1 \
+          --replicas 1 \
+          trades.raw candles
+    depends_on:
+      - redpanda
+    restart: "no"
 
   console:
     image: docker.redpanda.com/redpandadata/console:latest
@@ -128,6 +147,8 @@ services:
         condition: service_healthy
       airflow-api-server:
         condition: service_healthy
+      redpanda-topic-init:
+        condition: service_completed_successfully
 
   airflow-dag-processor:
     <<: *airflow-common
@@ -136,7 +157,8 @@ services:
   producer:
     build: ./producer
     depends_on:
-      - redpanda
+      redpanda-topic-init:
+        condition: service_completed_successfully
     environment:
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -197,16 +219,22 @@ services:
       - python
       - /opt/flink/submitter.py
     depends_on:
-      - jobmanager
-      - taskmanager
+      jobmanager:
+        condition: service_started
+      taskmanager:
+        condition: service_started
+      redpanda-topic-init:
+        condition: service_completed_successfully
     volumes:
       - ./flink/jobs:/opt/flink/jobs:ro
 
   sink:
     build: ./sink
     depends_on:
-      - redpanda
-      - postgres
+      redpanda-topic-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_started
     environment:
       REDPANDA_BROKER: redpanda:29092
       POSTGRES_HOST: postgres

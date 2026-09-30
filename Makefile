@@ -183,7 +183,7 @@ airflow-logs:
 # ---------------------------------------------------------------------------
 
 test:
-	docker compose run --rm \
+	docker compose run --rm --no-deps \
 		-v "$(CURDIR)/tests:/app/tests:ro" \
 		-v "$(CURDIR)/airflow/dags:/app/airflow/dags:ro" \
 		-e PYTHONPATH=/app/src \
