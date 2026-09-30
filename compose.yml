@@ -3,13 +3,15 @@ x-airflow-common: &airflow-common
     context: .
     dockerfile: airflow/Dockerfile
   environment: &airflow-common-env
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
-    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: airflow:admin
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/simple_auth_manager_passwords.json
-    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
-    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: airflow:admin
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
 
     ALPACA_API_KEY: ${ALPACA_API_KEY}
     ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
@@ -130,6 +132,16 @@ services:
       REDPANDA_BROKER: redpanda:29092
       PYTHONUNBUFFERED: "1"
 
+  flink-checkpoint-init:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - chown -R 9999:9999 /opt/flink/checkpoints
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    restart: "no"
+
   jobmanager:
     build: ./flink
     command: jobmanager
@@ -140,6 +152,9 @@ services:
         jobmanager.rpc.address: jobmanager
         parallelism.default: 1
         state.checkpoints.dir: file:///opt/flink/checkpoints
+    depends_on:
+      flink-checkpoint-init:
+        condition: service_completed_successfully
     volumes:
       - ./flink/jobs:/opt/flink/jobs
       - flink-checkpoints:/opt/flink/checkpoints
@@ -148,7 +163,10 @@ services:
     build: ./flink
     command: taskmanager
     depends_on:
-      - jobmanager
+      jobmanager:
+        condition: service_started
+      flink-checkpoint-init:
+        condition: service_completed_successfully
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager

@@ -186,25 +186,8 @@ def get_connection():
 
 
 def get_symbols():
-    query = """
-        SELECT DISTINCT symbol
-        FROM candles;
-    """
-
-    with get_connection() as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(query)
-            available_symbols = [row[0] for row in cursor.fetchall()]
-
-    return sorted(
-        available_symbols,
-        key=lambda symbol: (
-            symbol not in GAMMAN_SYMBOLS,
-            GAMMAN_SYMBOLS.index(symbol)
-            if symbol in GAMMAN_SYMBOLS
-            else symbol,
-        ),
-    )
+    """Return the symbols supported by the dashboard."""
+    return GAMMAN_SYMBOLS.copy()
 
 
 def get_candles(symbol, window_size, limit=200):
@@ -558,23 +541,7 @@ def create_market_chart(
 ## ======================================
 
 st.title("Streams of GAMMAN")
-#st.html(
-#    '''<style> div.c {text-indent: 10.1%;}</style>
-#    <body>
-#        <h1>Streams of GOOGL
-#            <div class='c'>AAPL
-#            </div>
-#            <div class='c'>META
-#            </div>
-#            <div class='c'>MSFT
-#            </div>
-#            <div class='c'>AMZN
-#            </div>
-#            <div class='c'>NVDA
-#            </div>
-#        </h1>
-#    </body>''')
-st.caption("Real-time stock market streaming pipeline")
+st.caption("Real-time stock market streaming pipeline to analyse the top US tech share prices")
 
 symbols = get_symbols()
 
@@ -844,54 +811,47 @@ def render_dashboard(
     # Historical scorecards
     # --------------------------------------
 
-    if show_historical_session:
-        if historical_metrics is None:
-            st.info(
-                f"No historical regular-session data is currently "
-                f"available for {symbol} on "
-                f"{historical_date.strftime('%a %d %b %Y')}."
-            )
-        else:
-            historical_close = historical_metrics["latest_price"]
-            historical_open = historical_metrics["session_open"]
+    if show_historical_session and historical_metrics is not None:
+        historical_close = historical_metrics["latest_price"]
+        historical_open = historical_metrics["session_open"]
 
-            price_change = historical_close - historical_open
-            price_change_percent = (
-                price_change / historical_open * 100
-                if historical_open
-                else None
-            )
+        price_change = historical_close - historical_open
+        price_change_percent = (
+            price_change / historical_open * 100
+            if historical_open
+            else None
+        )
 
-            historical_columns = st.columns([3,1,1,1,1])
+        historical_columns = st.columns([3, 1, 1, 1, 1])
 
-            historical_columns[0].subheader(
-                f"{historical_date.strftime('%a %d %b %Y')}",
-                divider="blue",
-            )
+        historical_columns[0].subheader(
+            f"{historical_date.strftime('%a %d %b %Y')}",
+            divider="blue",
+        )
 
-            historical_columns[1].metric(
-                "Close",
-                f"${historical_close:,.2f}",
-                (
-                    f"{price_change:+.2f} "
-                    f"({price_change_percent:+.2f}%)"
-                ),
-            )
+        historical_columns[1].metric(
+            "Close",
+            f"${historical_close:,.2f}",
+            (
+                f"{price_change:+.2f} "
+                f"({price_change_percent:+.2f}%)"
+            ),
+        )
 
-            historical_columns[2].metric(
-                "High",
-                f"${historical_metrics['session_high']:,.2f}",
-            )
+        historical_columns[2].metric(
+            "High",
+            f"${historical_metrics['session_high']:,.2f}",
+        )
 
-            historical_columns[3].metric(
-                "Low",
-                f"${historical_metrics['session_low']:,.2f}",
-            )
+        historical_columns[3].metric(
+            "Low",
+            f"${historical_metrics['session_low']:,.2f}",
+        )
 
-            historical_columns[4].metric(
-                "Volume",
-                f"{historical_metrics['session_volume']:,.0f}",
-            )
+        historical_columns[4].metric(
+            "Volume",
+            f"{historical_metrics['session_volume']:,.0f}",
+        )
 
     # --------------------------------------
     # Chart
