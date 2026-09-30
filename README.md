@@ -1,6 +1,8 @@
-# Streams of  GAMMAN
+<h1>Streams of  GAMMAN
+<br>
+- GOOGL, AAPL, META, MSFT, AMZN, NVDA</h1>
 
-#### _A local end-to-end data pipeline for processing streaming live and batched historical US stock-market trades._ ####
+#### _A local end-to-end data pipeline for processing streaming and backfilled US stock-market trades._ ####
 
 The pipeline consumes live trades from Alpaca, streams them through Redpanda and PyFlink, calculates OHLCV candles and moving averages, and serves the results from PostgreSQL to an interactive Streamlit dashboard.
 

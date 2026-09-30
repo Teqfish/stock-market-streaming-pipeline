@@ -494,7 +494,7 @@ def create_market_chart(
                 y=live["sma_5"],
                 mode="lines",
                 name="Live SMA 5",
-                line=dict(color="#359EFF"),
+                line=dict(color="#BE7A26"),
                 opacity=0.9,
                 connectgaps=False,
             ),
@@ -508,7 +508,7 @@ def create_market_chart(
                 y=live["sma_20"],
                 mode="lines",
                 name="Live SMA 20",
-                line=dict(color="#1E36D1"),
+                line=dict(color="#D1511E"),
                 opacity=0.7,
                 connectgaps=False,
             ),
@@ -599,23 +599,23 @@ with controls[1]:
     )
 
 with controls[2]:
+    show_live_session = st.checkbox(
+        "Show live session",
+        value=False,
+    )
+
+with controls[2]:
+    show_historical_session = st.checkbox(
+        "Show historical session",
+        value=True,
+    )
+
+with controls[3]:
     window_size = st.segmented_control(
         "Window",
         options=["1m", "5m", "15m"],
         default="1m",
         required=True,
-    )
-
-with controls[3]:
-    show_live_session = st.toggle(
-        "Show live session",
-        value=False,
-    )
-
-with controls[4]:
-    show_historical_session = st.toggle(
-        "Show historical session",
-        value=True,
     )
 
 @st.fragment(run_every="10s")
@@ -792,11 +792,6 @@ def render_dashboard(
     # --------------------------------------
 
     if show_live_session:
-        st.subheader(
-            f"Live session — "
-            f"{live_date.strftime('%a %d %b %Y')}"
-        )
-
         if live_metrics is None:
             st.info(
                 f"No live regular-session data is currently available "
@@ -813,9 +808,15 @@ def render_dashboard(
                 else None
             )
 
-            live_columns = st.columns(4)
+            live_columns = st.columns([3,1,1,1,1])
 
-            live_columns[0].metric(
+            live_columns[0].subheader(
+                f"TODAY — "
+                f"{live_date.strftime('%a %d %b %Y')}",
+                divider="orange",
+                )
+
+            live_columns[1].metric(
                 "Latest price",
                 f"${latest_price:,.2f}",
                 (
@@ -824,18 +825,18 @@ def render_dashboard(
                 ),
             )
 
-            live_columns[1].metric(
-                "Session high",
+            live_columns[2].metric(
+                "High",
                 f"${live_metrics['session_high']:,.2f}",
             )
 
-            live_columns[2].metric(
-                "Session low",
+            live_columns[3].metric(
+                "Low",
                 f"${live_metrics['session_low']:,.2f}",
             )
 
-            live_columns[3].metric(
-                "IEX session volume",
+            live_columns[4].metric(
+                "Volume",
                 f"{live_metrics['session_volume']:,.0f}",
             )
 
@@ -844,11 +845,6 @@ def render_dashboard(
     # --------------------------------------
 
     if show_historical_session:
-        st.subheader(
-            f"Historical session — "
-            f"{historical_date.strftime('%a %d %b %Y')}"
-        )
-
         if historical_metrics is None:
             st.info(
                 f"No historical regular-session data is currently "
@@ -866,9 +862,14 @@ def render_dashboard(
                 else None
             )
 
-            historical_columns = st.columns(4)
+            historical_columns = st.columns([3,1,1,1,1])
 
-            historical_columns[0].metric(
+            historical_columns[0].subheader(
+                f"{historical_date.strftime('%a %d %b %Y')}",
+                divider="blue",
+            )
+
+            historical_columns[1].metric(
                 "Close",
                 f"${historical_close:,.2f}",
                 (
@@ -877,18 +878,18 @@ def render_dashboard(
                 ),
             )
 
-            historical_columns[1].metric(
-                "Session high",
+            historical_columns[2].metric(
+                "High",
                 f"${historical_metrics['session_high']:,.2f}",
             )
 
-            historical_columns[2].metric(
-                "Session low",
+            historical_columns[3].metric(
+                "Low",
                 f"${historical_metrics['session_low']:,.2f}",
             )
 
-            historical_columns[3].metric(
-                "IEX session volume",
+            historical_columns[4].metric(
+                "Volume",
                 f"{historical_metrics['session_volume']:,.0f}",
             )
 
