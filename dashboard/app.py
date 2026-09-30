@@ -175,6 +175,38 @@ def session_exists(symbol, session_date):
             return cursor.fetchone()[0]
 
 
+def live_session_needs_backfill(symbol, session_date):
+    """
+    Return whether today's local candle data is missing the market open.
+
+    A live session needs catch-up when no 1m candles exist for the session,
+    or when its earliest candle starts after 09:30 New York time.
+    """
+    query = """
+        SELECT MIN(
+            (window_start AT TIME ZONE 'America/New_York')::time
+        )
+        FROM candles
+        WHERE symbol = %s
+          AND window_size = '1m'
+          AND (window_start AT TIME ZONE 'America/New_York')::date = %s
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                >= TIME '09:30'
+          AND (window_start AT TIME ZONE 'America/New_York')::time
+                < TIME '16:00';
+    """
+
+    with get_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(query, (symbol, session_date))
+            earliest_candle = cursor.fetchone()[0]
+
+    if earliest_candle is None:
+        return True
+
+    return earliest_candle > pd.Timestamp("09:30:00").time()
+
+
 def get_connection():
     return psycopg2.connect(
         host=POSTGRES_HOST,
@@ -540,8 +572,16 @@ def create_market_chart(
 ## RENDER DASHBOARD
 ## ======================================
 
-st.title("Streams of GAMMAN")
-st.caption("Real-time stock market streaming pipeline to analyse the top US tech share prices")
+st.html('''
+            <header>
+                <h1 style="font-size: 3em;margin-bottom: 10px;" align="center">
+                    Streams of GAMMAN
+                </h1>
+                <p style="font-size: 0.9em;margin-bottom: 40px;" align="center";>
+                    Real-time streaming pipeline for top US tech share prices
+                </p>
+            </header>
+        ''')
 
 symbols = get_symbols()
 
@@ -585,17 +625,80 @@ with controls[3]:
         required=True,
     )
 
+
 @st.fragment(run_every="10s")
 def render_backfill_controls(
     symbol,
     session_date,
+    show_live_session,
     show_historical_session,
 ):
+    live_date = get_current_market_date()
+
     try:
         backfill_runs = get_backfill_runs()
     except Exception as exc:
         st.warning(f"Could not retrieve Airflow backfill status: {exc}")
         backfill_runs = []
+
+    # --------------------------------------
+    # Automatic live-session catch-up
+    # --------------------------------------
+
+    if show_live_session:
+        live_backfill = get_active_backfill(
+            backfill_runs,
+            symbol,
+            live_date,
+        )
+
+        if live_backfill is None:
+            try:
+                needs_live_backfill = live_session_needs_backfill(
+                    symbol,
+                    live_date,
+                )
+
+                if needs_live_backfill:
+                    trigger_backfill(
+                        symbol,
+                        live_date,
+                    )
+
+                    st.info(
+                        f"Recovering today's earlier session for {symbol}. "
+                        "Live candles will continue to update while the "
+                        "backfill runs."
+                    )
+
+            except urllib.error.HTTPError as exc:
+                error_body = exc.read().decode()
+                st.error(
+                    f"Airflow rejected the live catch-up request "
+                    f"(HTTP {exc.code}): {error_body}"
+                )
+
+            except Exception as exc:
+                st.error(
+                    f"Could not start live-session catch-up: {exc}"
+                )
+
+        else:
+            if live_backfill["state"] == "running":
+                st.info(
+                    f"Recovering today's earlier session for {symbol}. "
+                    "Live candles will continue to update while the "
+                    "backfill runs."
+                )
+            else:
+                st.info(
+                    f"Today's live-session catch-up for {symbol} "
+                    "is queued."
+                )
+
+    # --------------------------------------
+    # Manual historical-session backfill
+    # --------------------------------------
 
     local_session_exists = session_exists(
         symbol,
@@ -668,6 +771,10 @@ def render_backfill_controls(
                 except Exception as exc:
                     st.error(f"Could not start backfill: {exc}")
 
+    # --------------------------------------
+    # Backfill queue
+    # --------------------------------------
+
     active_runs = [
         run
         for run in backfill_runs
@@ -710,6 +817,7 @@ def render_backfill_controls(
 render_backfill_controls(
     symbol,
     session_date,
+    show_live_session,
     show_historical_session,
 )
 
@@ -778,8 +886,8 @@ def render_dashboard(
             live_columns = st.columns([3,1,1,1,1])
 
             live_columns[0].subheader(
-                f"TODAY — "
-                f"{live_date.strftime('%a %d %b %Y')}",
+                f"{live_date.strftime('%a, %d %b %Y')}"
+                f" - TODAY",
                 divider="orange",
                 )
 
@@ -825,7 +933,7 @@ def render_dashboard(
         historical_columns = st.columns([3, 1, 1, 1, 1])
 
         historical_columns[0].subheader(
-            f"{historical_date.strftime('%a %d %b %Y')}",
+            f"{historical_date.strftime('%a, %d %b %Y')}",
             divider="blue",
         )
 

@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 WINDOW_MINUTES = {
@@ -28,8 +28,9 @@ def floor_timestamp(
 def build_expected_windows(
     events: list[dict],
     symbols: list[str],
+    requested_end: datetime,
 ) -> dict[str, dict[str, set[datetime]]]:
-    """Build expected candle windows from canonical trade events."""
+    """Build expected completed candle windows from canonical trade events."""
 
     expected_windows = {
         symbol: {
@@ -56,9 +57,19 @@ def build_expected_windows(
         )
 
         for window_size, minutes in WINDOW_MINUTES.items():
-            expected_windows[symbol][window_size].add(
-                floor_timestamp(timestamp, minutes)
+            window_start = floor_timestamp(
+                timestamp,
+                minutes,
             )
+
+            window_end = window_start + timedelta(
+                minutes=minutes,
+            )
+
+            if window_end <= requested_end:
+                expected_windows[symbol][window_size].add(
+                    window_start
+                )
 
     return expected_windows
 

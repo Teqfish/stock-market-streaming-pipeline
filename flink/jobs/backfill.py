@@ -281,7 +281,8 @@ def main():
             lambda candle: (
                 requested_start_timestamp
                 <= candle["window_start"]
-                < requested_end_timestamp
+                and candle["window_end"]
+                <= requested_end_timestamp
             )
         )
         .name("Requested Session Candles")

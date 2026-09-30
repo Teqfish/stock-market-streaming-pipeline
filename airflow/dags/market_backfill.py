@@ -128,14 +128,22 @@ def market_backfill():
         ]
 
         start = session["open"].to_pydatetime()
-        end = session["close"].to_pydatetime()
+        scheduled_end = session["close"].to_pydatetime()
 
         now = datetime.now(timezone.utc)
 
-        if end > now:
+        if now < start:
             raise AirflowFailException(
-                "trading session has not finished yet"
+                "trading session has not started yet"
             )
+
+        if now < scheduled_end:
+            end = now.replace(
+                second=0,
+                microsecond=0,
+            )
+        else:
+            end = scheduled_end
 
         return {
             "symbols": request["symbols"],
@@ -143,7 +151,6 @@ def market_backfill():
             "start": start.isoformat(),
             "end": end.isoformat(),
         }
-
     @task
     def resolve_processing_range(session: dict) -> dict:
         """Extend the requested session with a preceding XNYS session for SMA warm-up."""
@@ -569,6 +576,7 @@ def market_backfill():
             expected_windows = build_expected_windows(
                 requested_events,
                 symbols,
+                session_close,
             )
         except ValueError as exc:
             raise AirflowFailException(
