@@ -1,9 +1,8 @@
 .PHONY: \
-	start stop restart open \
-	up down build rebuild logs ps reset \
-	flink-build flink-up flink-down flink-restart flink-logs flink-submit flink-jobs \
+	build up down reset start open ps logs test \
+	flink-up flink-down flink-restart flink-logs flink-jobs flink-submit \
 	airflow-up airflow-down airflow-restart airflow-logs airflow-password \
-	test
+	producer-logs sink-logs dashboard-logs
 
 # ---------------------------------------------------------------------------
 # Configuration

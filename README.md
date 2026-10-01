@@ -119,171 +119,220 @@ Historical data can be displayed alongside the live session without requiring a 
 
 ## Running Locally
 
+The complete pipeline can be started from a fresh clone in two steps:
+
+1. clone and configure the repository;
+2. run `make start`.
+
 ### Prerequisites
 
-You will need:
+Install:
 
-- Docker Desktop with Docker Compose;
-- `make`;
-- Git;
-- an Alpaca account and API credentials.
+- Git
+- Docker Desktop with Docker Compose
+- `make`
+- `openssl`
+- `jq`
 
-The full stack runs Flink, Airflow, Redpanda, PostgreSQL, Streamlit and several supporting services simultaneously. **At least 8 GB of memory allocated to Docker Desktop is recommended.**
+Docker Desktop should be allocated at least **8 GB of memory**.
 
-### 1. Clone the repository
+You also need a free Alpaca account for market-data access.
+
+Create an account at:
+
+https://app.alpaca.markets/signup
+
+A paper-trading account is sufficient. After signing in, generate an API key and secret from the Alpaca dashboard.
+
+Keep both values available for the setup below. Alpaca only displays the secret when it is generated; if it is lost, generate a new key pair.
+
+### Step 1 — Clone and configure
+
+Choose the block for your operating system and paste the whole block into a terminal.
+
+#### macOS — VS Code
 
 ```bash
 git clone https://github.com/Teqfish/stock-market-streaming-pipeline.git
 cd stock-market-streaming-pipeline
+cp .env.example .env
+sed -i '' "s/your_generated_jwt_secret/$(openssl rand -hex 32)/" .env && code .env
 ```
 
-### 2. Create an Alpaca account and API credentials
-
-This project uses Alpaca's market-data APIs for both live IEX trades and historical trades.
-
-Create an Alpaca Trading API account:
-
-https://app.alpaca.markets/signup
-
-A paper-only account is sufficient for this project; no funded live-trading account is required.
-
-After signing in:
-
-1. select a **Paper Trading** account;
-2. open the **API Keys** section of the Alpaca dashboard;
-3. generate an API key and secret;
-4. save both values securely.
-
-Alpaca only displays the secret key when it is generated. If it is lost, generate a new key pair.
-
-Alpaca's paper-trading documentation is available at:
-
-https://docs.alpaca.markets/docs/paper-trading
-
-### 3. Create the local environment file
-
-Copy the example configuration:
+If the `code` command is not installed, use the built-in TextEdit application instead:
 
 ```bash
+git clone https://github.com/Teqfish/stock-market-streaming-pipeline.git
+cd stock-market-streaming-pipeline
 cp .env.example .env
+sed -i '' "s/your_generated_jwt_secret/$(openssl rand -hex 32)/" .env && open -e .env
 ```
 
-Open `.env` and add your own Alpaca credentials.
+#### Linux — VS Code
 
-For example:
+```bash
+git clone https://github.com/Teqfish/stock-market-streaming-pipeline.git
+cd stock-market-streaming-pipeline
+cp .env.example .env
+sed -i "s/your_generated_jwt_secret/$(openssl rand -hex 32)/" .env && code .env
+```
+
+If you use a different graphical text editor, replace `code .env` with the appropriate command for that editor.
+
+#### Windows — PowerShell + VS Code
+
+Run these commands in PowerShell:
+
+```powershell
+git clone https://github.com/Teqfish/stock-market-streaming-pipeline.git
+Set-Location stock-market-streaming-pipeline
+Copy-Item .env.example .env
+$jwt = -join ((1..32 | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })); (Get-Content .env -Raw).Replace('your_generated_jwt_secret', $jwt) | Set-Content .env; code .env
+```
+
+The setup block:
+
+1. clones the repository;
+2. enters the project directory;
+3. creates your private `.env` from `.env.example`;
+4. generates a random Airflow JWT signing secret;
+5. writes the generated secret into `.env`;
+6. opens `.env` for editing.
+
+In the opened `.env` file, replace:
 
 ```dotenv
 ALPACA_API_KEY=your_alpaca_api_key
 ALPACA_SECRET_KEY=your_alpaca_secret_key
+```
 
-AIRFLOW_JWT_SECRET=replace_with_a_random_secret
+with your own Alpaca credentials.
+
+The default local configuration can otherwise be left unchanged:
+
+```dotenv
+TICKERS=GOOGL,AAPL,META,MSFT,AMZN,NVDA
 
 POSTGRES_DB=stocks
 POSTGRES_USER=stocks
 POSTGRES_PASSWORD=stocks
-
-TICKERS=GOOGL,AAPL,META,MSFT,AMZN,NVDA
 ```
 
-Do **not** commit `.env`.
+Save and close `.env`.
 
-The Alpaca API key and secret belong to your Alpaca account and must remain private.
+Do not commit `.env`. It contains your private Alpaca credentials and locally generated Airflow JWT secret.
 
-`AIRFLOW_JWT_SECRET` is used by Airflow to sign and validate API authentication tokens. Generate your own random value with:
+You do **not** need to configure an Airflow UI username or password. Airflow generates its local password automatically during startup.
 
-```bash
-openssl rand -hex 32
-```
-
-Copy the resulting value into `.env`:
-
-```dotenv
-AIRFLOW_JWT_SECRET=<generated-value>
-```
-
-The PostgreSQL password protects only the locally running project database in this configuration, but it should still be kept in `.env` rather than committed to the repository.
-
-Airflow uses its Simple Auth Manager for this local deployment. On the first
-`make start`, Airflow generates a random password for the local `airflow` user
-and stores it in a private Docker volume. The dashboard reads that volume to
-authenticate with the Airflow API. Later starts reuse the same password;
-`make reset` removes the volume, so the next start generates a new one. No
-Airflow username or password needs to be added to `.env`.
-
-The project is not intended to expose Airflow publicly.
-
-### 4. Build and start the pipeline
-
-Run:
+### Step 2 — Start the pipeline
 
 ```bash
 make start
 ```
 
-`make start` builds the required images, starts the Docker Compose stack, waits for Flink to become available, submits the continuous PyFlink streaming job and opens the local project interfaces.
+The first startup can take several minutes while Docker downloads and builds the required environments.
 
-The initial build can take several minutes because Docker must download and build the Flink, Airflow and Python environments.
+`make start` automatically:
 
-Once startup completes, the main interfaces are:
+1. builds the required Docker images;
+2. starts the Docker Compose stack;
+3. initializes the required `trades.raw` and `candles` Redpanda topics;
+4. waits for the Flink JobManager;
+5. submits the continuous PyFlink streaming job;
+6. opens the local project interfaces;
+7. prints the generated Airflow UI credentials.
 
-| Service | URL | Purpose |
-|---|---|---|
-| **Streamlit** | http://localhost:8501 | Market dashboard and backfill controls |
-| **Airflow** | http://localhost:8082 | Backfill DAGs and task monitoring |
-| **Flink** | http://localhost:8081 | Streaming and bounded-job monitoring |
-| **Redpanda Console** | http://localhost:8080 | Topics, events and consumer inspection |
+When startup completes, the terminal will show:
 
-The live producer uses Alpaca's IEX feed. Outside US market hours there may be no new live trades, but historical sessions can still be reconstructed from the dashboard.
+```text
+Streams of GAMMAN is running.
 
-### Useful Make commands
+Dashboard:        http://localhost:8501
+Airflow:          http://localhost:8082
+Flink:            http://localhost:8081
+Redpanda Console: http://localhost:8080
 
-```bash
-make start
+Airflow login
+Username: airflow
+Password: <generated password>
 ```
 
-Build and start the complete pipeline and submit the continuous Flink job.
+The project is now running.
 
-```bash
-make ps
+Open the Streamlit dashboard at:
+
+```text
+http://localhost:8501
 ```
 
-Show the state of the project's containers.
+From the dashboard you can view live market data, request a current-session catch-up, and run historical backfills.
+
+### Local interfaces
+
+| Service | URL |
+| --- | --- |
+| Streamlit dashboard | `http://localhost:8501` |
+| Airflow | `http://localhost:8082` |
+| Flink | `http://localhost:8081` |
+| Redpanda Console | `http://localhost:8080` |
+
+Airflow's generated password is retained across normal restarts. To display the credentials again:
 
 ```bash
-make logs
+make airflow-password
 ```
 
-Follow Docker Compose logs.
-
-```bash
-make test
-```
-
-Run the automated test suite inside the project environment.
-
-```bash
-make flink-logs
-```
-
-Follow Flink JobManager, TaskManager and submitter logs.
-
-```bash
-make airflow-logs
-```
-
-Follow Airflow API server, scheduler and DAG processor logs.
-
-```bash
-make down
-```
-
-Stop and remove the project's containers while preserving named-volume data.
+A full:
 
 ```bash
 make reset
 ```
 
-Remove the stack **and its named volumes**. This deletes locally persisted PostgreSQL, Redpanda, Airflow and Flink state and should be used when a completely fresh environment is required.
+removes the project's Docker volumes, including the generated Airflow credentials. A new Airflow password is generated on the next startup.
+
+## Useful Make Commands
+
+```bash
+make start
+```
+
+Build the images, start the complete pipeline, submit the continuous Flink job, open the local interfaces, and display the generated Airflow credentials.
+
+```bash
+make down
+```
+
+Stop the pipeline while preserving its Docker volumes and stored data.
+
+```bash
+make reset
+```
+
+Stop the pipeline and remove its Docker volumes. This deletes local pipeline state and causes a new Airflow password to be generated on the next startup.
+
+```bash
+make ps
+```
+
+Show the current Docker Compose service state.
+
+```bash
+make flink-jobs
+```
+
+Show the jobs currently known to the Flink JobManager.
+
+```bash
+make airflow-password
+```
+
+Display the automatically generated local Airflow UI username and password.
+
+```bash
+make test
+```
+
+Run the project's automated test suite.
 
 ## Historical Backfills
 
