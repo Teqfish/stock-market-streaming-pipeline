@@ -1,3 +1,6 @@
+from datetime import datetime
+
+
 def build_trade_event(
     *,
     symbol: str,
@@ -15,7 +18,16 @@ def build_trade_event(
 
     symbol = symbol.upper()
 
-    event_id = f"alpaca:{feed}:{symbol}:{trade_id}"
+    timestamp = datetime.fromisoformat(
+        event_timestamp.replace("Z", "+00:00")
+    )
+
+    trading_date = timestamp.date().isoformat()
+
+    event_id = (
+        f"alpaca:{feed}:{symbol}:"
+        f"{trading_date}:{trade_id}"
+    )
 
     return {
         "event_id": event_id,

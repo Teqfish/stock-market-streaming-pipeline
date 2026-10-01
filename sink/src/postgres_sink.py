@@ -89,6 +89,8 @@ def prepare_candle(candle):
         **candle,
         "window_start": epoch_ms_to_datetime(candle["window_start"]),
         "window_end": epoch_ms_to_datetime(candle["window_end"]),
+        "sma_5": candle.get("sma_5"),
+        "sma_20": candle.get("sma_20"),
     }
 
 

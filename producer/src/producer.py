@@ -5,7 +5,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 from confluent_kafka import Producer
 
-from producer.src.trade_event import build_trade_event
+from trade_event import build_trade_event
 
 
 ALPACA_API_KEY = os.environ["ALPACA_API_KEY"]

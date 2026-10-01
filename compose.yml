@@ -1,4 +1,52 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: airflow/Dockerfile
+  environment: &airflow-common-env
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/auth/simple_auth_manager_passwords.json
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: airflow:admin
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: "10"
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+
+    ALPACA_API_KEY: ${ALPACA_API_KEY}
+    ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
+
+    REDPANDA_BROKER: redpanda:29092
+
+    PIPELINE_POSTGRES_HOST: postgres
+    PIPELINE_POSTGRES_PORT: 5432
+    PIPELINE_POSTGRES_DB: ${POSTGRES_DB}
+    PIPELINE_POSTGRES_USER: ${POSTGRES_USER}
+    PIPELINE_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - airflow-auth:/opt/airflow/auth
+    - ./airflow/data:/opt/airflow/data
+  depends_on:
+    airflow-auth-init:
+      condition: service_completed_successfully
+    airflow-postgres:
+      condition: service_healthy
+    redpanda-topic-init:
+      condition: service_completed_successfully
+
 services:
+  airflow-auth-init:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - chown -R 50000:0 /opt/airflow/auth && chmod 0770 /opt/airflow/auth
+    volumes:
+      - airflow-auth:/opt/airflow/auth
+    restart: "no"
+
   redpanda:
     image: docker.redpanda.com/redpandadata/redpanda:latest
     command:
@@ -17,6 +65,23 @@ services:
       - "9644:9644"
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+
+  redpanda-topic-init:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        until rpk -X brokers=redpanda:29092 topic list > /dev/null 2>&1; do
+          sleep 1
+        done
+        rpk -X brokers=redpanda:29092 topic create \
+          --if-not-exists \
+          --partitions 1 \
+          --replicas 1 \
+          trades.raw candles
+    depends_on:
+      - redpanda
+    restart: "no"
 
   console:
     image: docker.redpanda.com/redpandadata/console:latest
@@ -39,16 +104,77 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
 
+  airflow-postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: airflow
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    command: db migrate
+    restart: "no"
+
+  airflow-api-server:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8082:8080"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl --fail http://localhost:8080/api/v2/monitor/health || exit 1"
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-api-server:
+        condition: service_healthy
+      redpanda-topic-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+
   producer:
     build: ./producer
     depends_on:
-      - redpanda
+      redpanda-topic-init:
+        condition: service_completed_successfully
     environment:
       ALPACA_API_KEY: ${ALPACA_API_KEY}
       ALPACA_SECRET_KEY: ${ALPACA_SECRET_KEY}
       TICKERS: ${TICKERS}
       REDPANDA_BROKER: redpanda:29092
       PYTHONUNBUFFERED: "1"
+
+  flink-checkpoint-init:
+    image: alpine:latest
+    command:
+      - sh
+      - -c
+      - chown -R 9999:9999 /opt/flink/checkpoints
+    volumes:
+      - flink-checkpoints:/opt/flink/checkpoints
+    restart: "no"
 
   jobmanager:
     build: ./flink
@@ -60,6 +186,9 @@ services:
         jobmanager.rpc.address: jobmanager
         parallelism.default: 1
         state.checkpoints.dir: file:///opt/flink/checkpoints
+    depends_on:
+      flink-checkpoint-init:
+        condition: service_completed_successfully
     volumes:
       - ./flink/jobs:/opt/flink/jobs
       - flink-checkpoints:/opt/flink/checkpoints
@@ -68,22 +197,44 @@ services:
     build: ./flink
     command: taskmanager
     depends_on:
-      - jobmanager
+      jobmanager:
+        condition: service_started
+      flink-checkpoint-init:
+        condition: service_completed_successfully
     environment:
       FLINK_PROPERTIES: |
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 4096m
+        taskmanager.memory.task.off-heap.size: 512m
         parallelism.default: 1
         state.checkpoints.dir: file:///opt/flink/checkpoints
     volumes:
       - ./flink/jobs:/opt/flink/jobs
       - flink-checkpoints:/opt/flink/checkpoints
 
+  flink-submitter:
+    build: ./flink
+    entrypoint:
+      - python
+      - /opt/flink/submitter.py
+    depends_on:
+      jobmanager:
+        condition: service_started
+      taskmanager:
+        condition: service_started
+      redpanda-topic-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs:ro
+
   sink:
     build: ./sink
     depends_on:
-      - redpanda
-      - postgres
+      redpanda-topic-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_started
     environment:
       REDPANDA_BROKER: redpanda:29092
       POSTGRES_HOST: postgres
@@ -96,19 +247,27 @@ services:
   dashboard:
     build: ./dashboard
     depends_on:
-      - postgres
+      postgres:
+        condition: service_started
+      airflow-api-server:
+        condition: service_healthy
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      AIRFLOW_API_URL: http://airflow-api-server:8080
+      AIRFLOW_USERNAME: airflow
     ports:
       - "8501:8501"
     volumes:
       - ./dashboard:/app
+      - airflow-auth:/run/secrets/airflow:ro
 
 volumes:
+  airflow-auth:
   redpanda-data:
   postgres-data:
+  airflow-postgres-data:
   flink-checkpoints:

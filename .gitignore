@@ -219,3 +219,8 @@ __marimo__/
 
 # VS Code
 .vscode/
+
+# Airflow
+airflow/auth/
+airflow/data/
+airflow/logs/
