@@ -12,6 +12,22 @@ topic-dependent services start, including when no live trades are arriving.
 
 Historical market sessions can also be requested directly from the dashboard and reconstructed through an Airflow-orchestrated bounded Flink pipeline. When the pipeline starts after the market has opened, it can automatically catch up the current session from market open while live processing continues.
 
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Technology](#technology)
+- [How It Works](#how-it-works)
+- [Dashboard](#dashboard)
+- [Setup](#setup)
+- [Make Commands](#make-commands)
+- [Backfills](#backfills)
+- [Catch-ups](#catch-ups)
+- [Testing](#testing)
+- [Design Decisions](#design-decisions)
+- [Known Limitations](#known-limitations)
+- [Project Status](#project-status)
+- [Screenshots](#screenshots)
+
 ## Architecture
 
 ### Live streaming
@@ -64,6 +80,8 @@ For accurate moving averages, the bounded job also processes the preceding compl
 
 Only completed candle windows are emitted during an in-progress catch-up. The continuous Flink job remains responsible for windows that are still forming.
 
+[Back To Top](#streams-of-gamman)
+
 ## Technology
 
 | Technology | Role |
@@ -77,6 +95,7 @@ Only completed candle windows are emitted during an in-progress catch-up. The co
 | **Docker Compose** | Local infrastructure and service orchestration |
 | **Make** | Common build, startup, testing and service-management commands |
 
+[Back To Top](#streams-of-gamman)
 ## How It Works
 
 Each Alpaca trade receives a deterministic identity based on its feed, symbol and trade ID. The identity is independent of whether the trade arrived through the live or historical path, allowing the same market event to be recognised across both sources.
@@ -101,6 +120,8 @@ The continuous and bounded paths ultimately produce the same candle schema and u
 
 PostgreSQL writes use idempotent upserts, allowing historical sessions to be rerun without creating duplicate candle rows.
 
+[Back To Top](#streams-of-gamman)
+
 ## Dashboard
 
 The Streamlit dashboard provides:
@@ -117,11 +138,13 @@ The Streamlit dashboard provides:
 
 Historical data can be displayed alongside the live session without requiring a separate serving path.
 
-## Running Locally
+[Back To Top](#streams-of-gamman)
 
-The complete pipeline can be started from a fresh clone in two steps:
+## Setup
 
-1. clone and configure the repository;
+Once you have Alpaca API credentials, the complete pipeline can be started from a fresh clone in two steps:
+
+1. run the setup block for your operating system, then paste your Alpaca credentials into the `.env` file that opens;
 2. run `make start`.
 
 ### Prerequisites
@@ -133,6 +156,9 @@ Install:
 - `make`
 - `openssl`
 - `jq`
+- a graphical text editor
+
+The setup examples below use VS Code where available. On macOS, the built-in TextEdit application can be used instead.
 
 Docker Desktop should be allocated at least **8 GB of memory**.
 
@@ -187,7 +213,7 @@ Run these commands in PowerShell:
 git clone https://github.com/Teqfish/stock-market-streaming-pipeline.git
 Set-Location stock-market-streaming-pipeline
 Copy-Item .env.example .env
-$jwt = -join ((1..32 | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })); (Get-Content .env -Raw).Replace('your_generated_jwt_secret', $jwt) | Set-Content .env; code .env
+$jwt = openssl rand -hex 32; (Get-Content .env -Raw).Replace('your_generated_jwt_secret', $jwt) | Set-Content .env; code .env
 ```
 
 The setup block:
@@ -239,8 +265,8 @@ The first startup can take several minutes while Docker downloads and builds the
 3. initializes the required `trades.raw` and `candles` Redpanda topics;
 4. waits for the Flink JobManager;
 5. submits the continuous PyFlink streaming job;
-6. opens the local project interfaces;
-7. prints the generated Airflow UI credentials.
+6. opens the local web interfaces;
+7. prints the generated Airflow UI credentials in the terminal.
 
 When startup completes, the terminal will show:
 
@@ -290,7 +316,9 @@ make reset
 
 removes the project's Docker volumes, including the generated Airflow credentials. A new Airflow password is generated on the next startup.
 
-## Useful Make Commands
+[Back To Top](#streams-of-gamman)
+
+## Make Commands
 
 ```bash
 make start
@@ -334,7 +362,9 @@ make test
 
 Run the project's automated test suite.
 
-## Historical Backfills
+[Back To Top](#streams-of-gamman)
+
+## Backfills
 
 Historical sessions are normally requested through the Streamlit dashboard.
 
@@ -346,7 +376,9 @@ Only one bounded reconstruction is allowed to run at a time. This prevents multi
 
 A bounded reconstruction normally completes in roughly a minute on the development environment, although runtime depends on the amount of trade data and the resources allocated to Docker.
 
-## Current-Session Catch-up
+[Back To Top](#streams-of-gamman)
+
+## Catch-ups
 
 If the pipeline is started after the US market has already opened, enabling the live-session view can trigger a catch-up from the day's market open to the current completed minute.
 
@@ -362,6 +394,8 @@ For example:
 The catch-up and live paths converge on the same `candles` topic and PostgreSQL table, so the dashboard presents them as one continuous trading session.
 
 Incomplete 5m or 15m windows are not emitted by the bounded job. They remain the responsibility of the continuously running Flink job and appear once those windows close.
+
+[Back To Top](#streams-of-gamman)
 
 ## Testing
 
@@ -385,6 +419,8 @@ Run the automated tests with:
 make test
 ```
 
+[Back To Top](#streams-of-gamman)
+
 ## Design Decisions
 
 **Redpanda as the durable event layer:** Flink outputs return to Redpanda rather than being written directly to PostgreSQL. This separates stream processing from downstream consumers and provides a durable, replayable boundary between processing and serving.
@@ -393,7 +429,7 @@ make test
 
 **Separate continuous and bounded Flink processing:** Historical events cannot simply be inserted into a continuously advancing event-time pipeline because its watermark has already moved beyond them. Bounded reconstruction allows historical sessions to reuse the processing logic with independent event-time state.
 
-**Warm-up data for stateful indicators:** A requested historical session is processed with data from the preceding completed XNYS session so SMA-5 and SMA-20 are valid from the beginning of the requested session. Warm-up data affects processing state but is not emitted as requested output.
+**Warm-up data for stateful indicators:** A requested historical session is processed with data from the preceding completed XNYS session to provide prior candle history for SMA-5 and SMA-20 calculations. Warm-up data affects processing state but is not emitted as requested output.
 
 **Redpanda loopback before PostgreSQL:** Processed candle events are written back to Redpanda before a separate sink writes them to PostgreSQL. This keeps Flink focused on stream processing while downstream consumers remain independently replayable.
 
@@ -402,6 +438,8 @@ make test
 **Airflow for bounded work, Flink for stream processing:** Airflow coordinates finite historical jobs and validation while Flink owns event-time transformation. Each tool is used for the workload it is designed to manage.
 
 **Local-first architecture:** The project is intentionally designed to demonstrate streaming, orchestration, stateful processing and replay on a single development machine rather than reproduce a production-scale cloud platform.
+
+[Back To Top](#streams-of-gamman)
 
 ## Known Limitations
 
@@ -415,8 +453,16 @@ make test
 
 These are deliberate scope decisions for a portfolio data-engineering project rather than attempts to model a production trading platform.
 
+[Back To Top](#streams-of-gamman)
+
 ## Project Status
 
 **Complete.**
 
 Streams of GAMMAN demonstrates an end-to-end local data-engineering system combining live event streaming, event-time processing, durable messaging, stateful aggregation, historical reconstruction, workflow orchestration, validation, persistent serving and interactive analytics.
+
+[Back To Top](#streams-of-gamman)
+
+## Screenshots
+
+<!-- TODO -->
