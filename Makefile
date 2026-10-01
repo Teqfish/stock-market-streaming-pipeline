@@ -2,7 +2,7 @@
 	start stop restart open \
 	up down build rebuild logs ps reset \
 	flink-build flink-up flink-down flink-restart flink-logs flink-submit flink-jobs \
-	airflow-up airflow-down airflow-restart airflow-logs \
+	airflow-up airflow-down airflow-restart airflow-logs airflow-password \
 	test
 
 # ---------------------------------------------------------------------------
@@ -29,6 +29,8 @@ start: build up flink-submit open
 	@echo "Airflow:          $(AIRFLOW_URL)"
 	@echo "Flink:            $(FLINK_URL)"
 	@echo "Redpanda Console: $(REDPANDA_URL)"
+	@echo ""
+	@$(MAKE) --no-print-directory airflow-password
 
 # Stop the complete pipeline while preserving persistent volumes.
 stop: down
@@ -176,6 +178,19 @@ airflow-logs:
 		airflow-api-server \
 		airflow-scheduler \
 		airflow-dag-processor
+
+airflow-password:
+	@PASSWORD="$$(docker compose exec -T airflow-api-server \
+		cat /opt/airflow/auth/simple_auth_manager_passwords.json 2>/dev/null | \
+		jq -r '.airflow // empty')"; \
+	if [ -z "$$PASSWORD" ]; then \
+		echo "Could not read the generated Airflow password."; \
+		echo "Check that Airflow is running with: make ps"; \
+		exit 1; \
+	fi; \
+	echo "Airflow login"; \
+	echo "Username: airflow"; \
+	echo "Password: $$PASSWORD"
 
 
 # ---------------------------------------------------------------------------
