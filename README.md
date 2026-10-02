@@ -18,6 +18,7 @@ Historical market sessions can also be requested directly from the dashboard and
 - [Technology](#technology)
 - [How It Works](#how-it-works)
 - [Dashboard](#dashboard)
+- [Screenshots](#screenshots)
 - [Setup](#setup)
 - [Make Commands](#make-commands)
 - [Backfills](#backfills)
@@ -26,7 +27,6 @@ Historical market sessions can also be requested directly from the dashboard and
 - [Design Decisions](#design-decisions)
 - [Known Limitations](#known-limitations)
 - [Project Status](#project-status)
-- [Screenshots](#screenshots)
 
 ## Architecture
 
@@ -96,6 +96,7 @@ Only completed candle windows are emitted during an in-progress catch-up. The co
 | **Make** | Common build, startup, testing and service-management commands |
 
 [Back To Top](#streams-of-gamman)
+
 ## How It Works
 
 Each Alpaca trade receives a deterministic identity based on its feed, symbol and trade ID. The identity is independent of whether the trade arrived through the live or historical path, allowing the same market event to be recognised across both sources.
@@ -137,6 +138,12 @@ The Streamlit dashboard provides:
 - live and historical overlays on a common intraday time axis.
 
 Historical data can be displayed alongside the live session without requiring a separate serving path.
+
+[Back To Top](#streams-of-gamman)
+
+## Screenshots
+
+![Screenshot](screenshot.png)
 
 [Back To Top](#streams-of-gamman)
 
@@ -462,7 +469,3 @@ These are deliberate scope decisions for a portfolio data-engineering project ra
 Streams of GAMMAN demonstrates an end-to-end local data-engineering system combining live event streaming, event-time processing, durable messaging, stateful aggregation, historical reconstruction, workflow orchestration, validation, persistent serving and interactive analytics.
 
 [Back To Top](#streams-of-gamman)
-
-## Screenshots
-
-<!-- TODO -->
